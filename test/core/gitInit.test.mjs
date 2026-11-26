@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile, spawnSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -436,7 +437,13 @@ test('gitInit: real git creates a clean, committed repository', async (t) => {
   assert.ok(result.initializedAt)
 
   const top = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: dir })
-  const normalize = (value) => path.resolve(value.trim()).replace(/[\\/]+$/, '').toLowerCase()
+  // git prints the canonical long path; os.tmpdir() on Windows may be an 8.3 short
+  // path (C:\Users\X00968~1\...), so resolve both through the real path before comparing.
+  const normalize = (value) => {
+    const resolved = path.resolve(value.trim())
+    const canonical = (() => { try { return realpathSync.native(resolved) } catch { return resolved } })()
+    return canonical.replace(/[\\/]+$/, '').toLowerCase()
+  }
   assert.equal(normalize(top.stdout), normalize(dir))
 
   const status = await execFileAsync('git', ['status', '--porcelain'], { cwd: dir })

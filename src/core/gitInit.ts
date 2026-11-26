@@ -9,6 +9,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -207,8 +208,18 @@ function parseToplevel(stdout: string): string {
 }
 
 function sameDirectory(a: string, b: string): boolean {
-  const left = path.resolve(a)
-  const right = path.resolve(b)
+  // git prints the canonical path (long names on Windows); a caller-supplied root
+  // may carry an 8.3 short name (e.g. %TEMP%\...), so canonicalize both sides
+  // through the real path before comparing, falling back to the lexical form.
+  const canonical = (value: string): string => {
+    try {
+      return realpathSync.native(value)
+    } catch {
+      return value
+    }
+  }
+  const left = canonical(path.resolve(a))
+  const right = canonical(path.resolve(b))
   const normalize = (value: string): string => {
     const trimmed = value.length > 3 ? value.replace(/[\\/]+$/, '') : value
     return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed
