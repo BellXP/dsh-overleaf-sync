@@ -25,6 +25,7 @@ import type {
   RemoteUpdate,
   TextOp,
 } from '../types.js'
+import type { Agent } from 'node:http'
 import { OverleafSyncError } from '../core/errors.js'
 import { LegacyOverleafSocket } from './legacy.js'
 import {
@@ -42,6 +43,8 @@ const CONNECT_BUDGET_MS = 15_000
 
 export interface LegacyTransportOptions {
   signal?: AbortSignal
+  /** Route the socket through this proxy agent (see `./proxy.ts`); direct without one. */
+  agent?: Agent
   /** Log protocol traffic to stderr (never logs the cookie). */
   debug?: boolean
 }
@@ -162,6 +165,7 @@ export class LegacyTransport implements OverleafTransport {
       projectId,
       timeoutMs: CONNECT_BUDGET_MS,
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.agent ? { agent: options.agent } : {}),
       ...(options.debug === true ? { onDebug: debugSink(true) } : {}),
     })
     const transport = new LegacyTransport(socket, credential, projectId)

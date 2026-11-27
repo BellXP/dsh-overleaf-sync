@@ -12,7 +12,7 @@
  * no new npm dependency is required. Wire format notes: `docs/legacy-socket.md`.
  */
 import { createHash, randomBytes } from 'node:crypto'
-import { request as httpRequest, type ClientRequest, type IncomingHttpHeaders } from 'node:http'
+import { request as httpRequest, type Agent, type ClientRequest, type IncomingHttpHeaders } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
 
@@ -108,6 +108,11 @@ export interface LegacySocketOptions {
   /** Total budget for `connect()`, 15000 ms by default. */
   timeoutMs?: number
   signal?: AbortSignal
+  /**
+   * Route the handshake and the websocket upgrade through this proxy agent
+   * (see `./proxy.ts`). Without one every request opens its own direct socket, as before.
+   */
+  agent?: Agent
   /** Debug sink, silent by default. */
   onDebug?: (message: string) => void
 }
@@ -502,6 +507,7 @@ interface HttpResponse {
 function requestOptions(
   url: URL,
   headers: Record<string, string>,
+  agent?: Agent,
 ): {
   method: string
   protocol: string
@@ -509,7 +515,7 @@ function requestOptions(
   port: number | undefined
   path: string
   headers: Record<string, string>
-  agent: false
+  agent: Agent | false
 } {
   return {
     method: 'GET',
@@ -518,7 +524,8 @@ function requestOptions(
     port: url.port === '' ? undefined : Number(url.port),
     path: `${url.pathname}${url.search}`,
     headers,
-    agent: false,
+    // `false` = one disposable socket per request; a proxy agent replaces it (see ./proxy.ts).
+    agent: agent ?? false,
   }
 }
 
@@ -552,6 +559,7 @@ function httpGet(
   timeoutMs: number,
   signal?: AbortSignal,
   label = 'socket.io handshake',
+  agent?: Agent,
 ): Promise<HttpResponse> {
   return new Promise<HttpResponse>((resolve, reject) => {
     let settled = false
@@ -581,7 +589,7 @@ function httpGet(
     }
 
     try {
-      const options = requestOptions(url, headers)
+      const options = requestOptions(url, headers, agent)
       request = url.protocol === 'http:' ? httpRequest(options) : httpsRequest(options)
     } catch (error) {
       fail(networkFailure(error, label))
@@ -674,6 +682,7 @@ export class LegacyOverleafSocket {
   readonly #timeoutMs: number
   readonly #signal: AbortSignal | undefined
   readonly #onDebug: ((message: string) => void) | undefined
+  readonly #agent: Agent | undefined
 
   #socket: Duplex | undefined
   #frames = new WebSocketFrameParser()
@@ -732,6 +741,7 @@ export class LegacyOverleafSocket {
         : CONNECT_BUDGET_MS
     this.#signal = options.signal
     this.#onDebug = options.onDebug
+    this.#agent = options.agent
   }
 
   /**
@@ -1083,7 +1093,7 @@ export class LegacyOverleafSocket {
     url.searchParams.set('projectId', this.#projectId)
     url.searchParams.set('t', String(Date.now()))
     this.#debug(`GET ${url.pathname}${url.search}`)
-    const response = await httpGet(url, this.#requestHeaders(), budgetMs)
+    const response = await httpGet(url, this.#requestHeaders(), budgetMs, undefined, 'socket.io handshake', this.#agent)
     if (response.statusCode !== 200) {
       const location =
         typeof response.headers.location === 'string' ? response.headers.location : undefined
@@ -1130,7 +1140,7 @@ export class LegacyOverleafSocket {
       timer.unref()
 
       try {
-        const options = requestOptions(url, headers)
+        const options = requestOptions(url, headers, this.#agent)
         request = url.protocol === 'http:' ? httpRequest(options) : httpsRequest(options)
       } catch (error) {
         fail(networkFailure(error, label))
@@ -1463,7 +1473,7 @@ export type SocketProtocol = 'v4' | 'legacy'
  */
 export async function detectSocketProtocol(
   baseUrl: string,
-  options: { cookie?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+  options: { cookie?: string; timeoutMs?: number; signal?: AbortSignal; agent?: Agent } = {},
 ): Promise<SocketProtocol> {
   let origin: string
   let prefix: string
@@ -1495,6 +1505,7 @@ export async function detectSocketProtocol(
       timeoutMs,
       options.signal,
       'socket.io protocol probe',
+      options.agent,
     )
     if (response.statusCode !== 200) return 'v4'
     return LEGACY_HANDSHAKE_PATTERN.test(response.body.trim()) ? 'legacy' : 'v4'

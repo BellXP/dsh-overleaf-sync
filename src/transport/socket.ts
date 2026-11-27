@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { Agent } from 'node:http'
 
 import { io, type ManagerOptions, type Socket, type SocketOptions } from 'socket.io-client'
 
@@ -343,6 +344,11 @@ export interface SocketConnectOptions {
   signal?: AbortSignal
   /** Log the socket protocol to stderr (never logs the cookie). */
   debug?: boolean
+  /**
+   * Route the websocket through this proxy agent (see `./proxy.ts`). Only the websocket
+   * transport can carry an agent, so a proxied socket never falls back to polling.
+   */
+  agent?: Agent
 }
 
 /** Where socket.io lives for a given Overleaf base URL. */
@@ -403,6 +409,8 @@ export class OverleafSocket implements OverleafTransport {
   private reconnecting = false
   private closed = false
   private closing?: Promise<void>
+  /** Proxy agent for the websocket (see `./proxy.ts`); undefined = direct connection. */
+  private readonly agent?: Agent
   private lastState?: ConnectionState
   private pendingJoinReject?: (error: Error) => void
 
@@ -411,7 +419,7 @@ export class OverleafSocket implements OverleafTransport {
     projectId: string,
     options: SocketConnectOptions = {},
   ): Promise<OverleafSocket> {
-    const transport = new OverleafSocket(credential, projectId, options.debug === true)
+    const transport = new OverleafSocket(credential, projectId, options.debug === true, options.agent)
     try {
       await transport.open(options.signal)
       return transport
@@ -421,7 +429,12 @@ export class OverleafSocket implements OverleafTransport {
     }
   }
 
-  private constructor(credential: Credential, projectId: string, debug: boolean) {
+  private constructor(
+    credential: Credential,
+    projectId: string,
+    debug: boolean,
+    agent?: Agent,
+  ) {
     let endpoint: SocketEndpoint
     try {
       endpoint = socketEndpoint(credential.baseUrl)
@@ -439,6 +452,7 @@ export class OverleafSocket implements OverleafTransport {
     this.origin = origin
     if (socketPath !== undefined) this.socketPath = socketPath
     this.debug = debug
+    this.agent = agent
     this.sourceId = `dsh-overleaf-sync-${randomUUID().slice(0, 8)}`
   }
 
@@ -615,6 +629,11 @@ export class OverleafSocket implements OverleafTransport {
       'max reconnection attempts': 10,
       'force new connection': true,
       ...(this.socketPath === undefined ? {} : { path: this.socketPath }),
+      // A proxy agent can only ride the websocket transport; polling would open its own
+      // direct sockets and hang on a network that lets traffic out through the proxy alone.
+      ...(this.agent === undefined
+        ? {}
+        : { transports: ['websocket'], transportOptions: { websocket: { agent: this.agent } } }),
       extraHeaders: {
         Origin: this.origin,
         Cookie: this.credential.cookie,

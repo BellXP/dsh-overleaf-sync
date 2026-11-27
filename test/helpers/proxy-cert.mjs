@@ -1,0 +1,61 @@
+/**
+ * Throwaway self-signed certificate for the proxy-tunnel tests (`test/transport/proxy.test.mjs`).
+ *
+ * `CN=target.test`, `CA:TRUE`, valid for 100 years, generated once with:
+ *   openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj '/CN=target.test' \
+ *     -addext 'subjectAltName=DNS:target.test,DNS:*.target.test' -addext 'basicConstraints=critical,CA:TRUE'
+ *
+ * The test hands it to a child Node through `NODE_EXTRA_CA_CERTS`, so the TLS the plugin
+ * verifies at the end of the tunnel is real verification against a real trust store — not
+ * `rejectUnauthorized: false`. The key secures nothing but a loopback test server.
+ */
+
+export const TEST_CERT = `-----BEGIN CERTIFICATE-----
+MIIDNjCCAh6gAwIBAgIUImMPwLro6dxSQxbGRHQ9ZQv9KxgwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLdGFyZ2V0LnRlc3QwIBcNMjYxMTI3MDgxOTExWhgPMjEy
+NjExMDMwODE5MTFaMBYxFDASBgNVBAMMC3RhcmdldC50ZXN0MIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsQ1GQVMIkt2buDKkrfWV7F0CQJHFZ4FsjBDk
+/PAKwEa+WimWA+Qfo+AYVpF13k2SXmoWdVr/61jtEf426LUGkcVtX7azsTTiWfQE
+CdvIgkSPr2YqeFs3EAXOWc9Rr6WSI0bAaraRfPBOGRP1v7bCCqvTlTzdG/BKHxN2
+mfHyrw05fskg84C0ookmLDHJyo03zEjGAz0r14lZZ+3GS+yRXqTnVdaiYDEXMNZe
+iuF27CsX1xZ/ZsOap7k2VZVFxaMbtx0CczCKm3Z6/DBHNkbC1Cb+3VSeQW5ie1H2
+Dl09oO+KWNb9thrB95TbkzCidh0LZByKxCXYUmheBu4aNIk76QIDAQABo3oweDAd
+BgNVHQ4EFgQUEvbmGyq3mQIdDktfNaKzqpK5ccgwHwYDVR0jBBgwFoAUEvbmGyq3
+mQIdDktfNaKzqpK5ccgwJQYDVR0RBB4wHIILdGFyZ2V0LnRlc3SCDSoudGFyZ2V0
+LnRlc3QwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAZ6IKsoLG
+79LrOpKLIDBL8QanBDNEQxz+4IDfXukXceznjg5R7Hn3PZBWjNRrNQrQjdzEx0OO
+NKGBrQQ3vFBfsfQlNeDkTsTiP9Fqs96Zqlfp0ec6hXfmCGEtZgxVI4olXT1J/j0l
+XcU9IFYfTVpHfSQFyaXjc/h24rgUS/HvtuAdVh+m99yU6Qphk7mfA36LUfXrhkh8
+5CT25uukZUdwZarfTmMEPlBaxqOYqJrGbDCuoqI7GcTakOBC2WTE+bENqeSRh+KB
+AqEQ+qionNL5hKMaNS16uz5l/M0g+q/OmwOFMjLIrYdcnJwVy225Iw9KZP8CwIcG
+0MP9GhF2LlA6uw==
+-----END CERTIFICATE-----`
+
+export const TEST_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCxDUZBUwiS3Zu4
+MqSt9ZXsXQJAkcVngWyMEOT88ArARr5aKZYD5B+j4BhWkXXeTZJeahZ1Wv/rWO0R
+/jbotQaRxW1ftrOxNOJZ9AQJ28iCRI+vZip4WzcQBc5Zz1GvpZIjRsBqtpF88E4Z
+E/W/tsIKq9OVPN0b8EofE3aZ8fKvDTl+ySDzgLSiiSYsMcnKjTfMSMYDPSvXiVln
+7cZL7JFepOdV1qJgMRcw1l6K4XbsKxfXFn9mw5qnuTZVlUXFoxu3HQJzMIqbdnr8
+MEc2RsLUJv7dVJ5BbmJ7UfYOXT2g74pY1v22GsH3lNuTMKJ2HQtkHIrEJdhSaF4G
+7ho0iTvpAgMBAAECggEAInDXHEj3L36NVpj/YNmXhumW0RGqKVbLUznMGYnmRX3d
+dHOHe41KPFoQ0fIs0Agd82DGqqB/jPv47dmaO81PEFcrzgUf0lZbu6zUhkhrKjAF
+FVUV6OCxhtviRqUmGjlmgpc2QevuxDOItack1FzMRUAkgfDbgB5PhNkH5q1ijHt+
+v7MA7mhJFEAiO7oLxjNDjowyZPoYtFWCS4ApwdsRAsP0Q00ABQhlwZWLEL2arhpW
+/7oJGaa2wQCV7C91vcW+bpcRlfmJMNU+qj71cCtQ8VgZ5BW9US4FVkIhwOW+BrP2
+5bFotX9B1YIiAl8nPy7BNtEM6Fmy0xVehh+vVuLZWwKBgQDYJIhbWK9IaO+DhZQB
+kUGugVjSZANhDCzy6iXgppS4ts7e0XJYaZS1QtS9Fn1VLvXlxkh7Zd900Q13nQTr
+W/W+8wbq4BJB62qsamEh9n5EAO+dsKLfZmcReg2FCE64u9SE3x/CRTIPthjWqSn0
+geIbSwMR+SinlrPaJJmhZwjMHwKBgQDRs2Blgok499I7v+cJbmXgjCy6Mox2Dgjx
+JiYr0+8jP8SfZizHd7ZCyOat45XLDmJOFkk+siXqEFDmp/1StQfaNDep5Hu03ZSj
+MfsrQDCSaSDsrqJvlpizdywfmG+NEaUa3k3pD70as2IlDaqOdel2Tn0wRevoRque
+AmURxEp29wKBgDl1TMJryv0G2FUwV24rPTi0rfYQHE3aPMC+uh8EaZjJEClvqGQU
+fTHKeF9j8SGKAFh6453aMRMO1/OqTDp9EdEXLgmWU4QunwcCqJusuVg+n3ReFo4o
+3NFqjtmEodi+JfrEjd7JIkvG7sdx5PNY69CxmjlW8RXMHDerbyPXDiGlAoGADjTw
+2u+1DD795z5hEKqCDGxyu0qhaX4Z7PyAqYd6NBEl6QarEfhySKQDvNQmWdNnpZKs
+86puFyVz1ayb5PaOyaGwA7qPBvncEBJaydtXbxPgPyi1qImzXrU8MAfLxurjHKbi
+8F84mI5+n7QFUhF696DpqlOSX/IpvlK7NjDuOpECgYEAjSi3g+wTbhO6gdmtuGGy
+eKbD8tpttPK2MfX6Qol3d71i1VuzcPQQ1pQ3Fzw6wvP1g7xXyqEL110FsLTry0mS
+zFe4uU1UZMGe6/MAbNv3r//TpX/gyCmBot8zWncucIR5oqN3G4EIzhZm5CCmLrq+
+ya66n3PAkQvzD6U0wazlsSI=
+-----END PRIVATE KEY-----`
