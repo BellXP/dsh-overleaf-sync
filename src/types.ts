@@ -115,6 +115,12 @@ export interface LinkRecord {
   projectName: string
   /** absolute path of the local folder */
   localRoot: string
+  /**
+   * SSH host alias (dsh-cloud-workspaces). When set, `localRoot` is a directory
+   * on that host: every file travels through the `ssh` service, and only plugin
+   * state stays on the machine that runs dsh. The host never needs Overleaf.
+   */
+  host?: string
   include?: string[]
   exclude?: string[]
   strategy?: ConflictStrategy
@@ -161,6 +167,8 @@ export interface ProjectState {
   schemaVersion: 1
   projectId: string
   localRoot: string
+  /** SSH host the folder lives on, when it is not this machine. */
+  host?: string
   updatedAt: string
   files: Record<string, FileState>
   filesMissing?: Record<string, { docId: string; deletedAt: string }>

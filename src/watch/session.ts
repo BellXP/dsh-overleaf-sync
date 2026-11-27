@@ -3,14 +3,14 @@
  *
  * One session = one linked project while `overleaf_watch` is running:
  *
- *   fs.watch(localRoot)  ──debounce──▶ diffToOps ▶ applyOtUpdate ▶ state
- *   transport.onRemoteUpdate ────────▶ applyOps ▶ atomic write ▶ state
+ *   tree.watch(localRoot) ──debounce──▶ diffToOps ▶ applyOtUpdate ▶ state
+ *   transport.onRemoteUpdate ─────────▶ applyOps ▀▶ atomic write ▶ state
  *
  * Guard rails that make this safe rather than clever:
  *
  * - **Loop suppression** happens on *content*, not on events: a write we made
  *   ourselves changes the file back to a hash the baseline already knows, so the
- *   fs event is dropped. No timing assumptions, no "ignore next event" flags.
+ *   change is dropped. No timing assumptions, no "ignore next event" flags.
  * - **Never overwrite unread edits**: a local commit is only sent when the
  *   remote still matches the baseline's `remoteHash`; otherwise the conflict
  *   path archives both sides instead of guessing.
@@ -18,18 +18,22 @@
  *   long-running session does not pin every document open (the reference
  *   implementation's biggest resource leak).
  * - Every side effect is cancelled by `stop()`: watcher, timers, socket.
+ *
+ * The files live wherever the link says — this machine or an SSH host — and are
+ * reached only through `TreeIo`. On this machine the OS reports every change;
+ * on a host the tracked documents are polled (`watch.pollMs`).
  */
 
 import fs from 'node:fs/promises'
-import { watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 
 import type { Config } from '../config.js'
 import { OverleafSyncError } from '../core/errors.js'
-import { atomicWrite, normalizeEol, readTextIfExists, sha256 } from '../core/fsUtil.js'
+import { normalizeEol, sha256 } from '../core/fsUtil.js'
 import { loadIgnoreMatcher } from '../core/ignore.js'
 import { applyOps, diffToOps } from '../core/otDiff.js'
 import { StateStore } from '../core/stateStore.js'
+import { localTree, type TreeIo } from '../core/tree.js'
 import { writeTextConflict } from '../core/conflicts.js'
 import type { LinkRecord, OverleafTransport, RemoteUpdate } from '../types.js'
 
@@ -57,6 +61,8 @@ export interface WatchSessionOptions {
   transport: OverleafTransport
   config: Config
   docs: WatchDocRef[]
+  /** Where the linked files are; defaults to this machine's disk. */
+  tree?: TreeIo
   logger?: WatchLogger
   onEvent?: (event: WatchEvent) => void
 }
@@ -77,6 +83,7 @@ export class WatchSession {
   private readonly link: LinkRecord
   private readonly transport: OverleafTransport
   private readonly config: Config
+  private readonly tree: TreeIo
   private readonly logger?: WatchLogger
   private readonly onEvent?: (event: WatchEvent) => void
   private readonly docsByPath = new Map<string, string>()
@@ -87,7 +94,7 @@ export class WatchSession {
   private readonly events: WatchEvent[] = []
   private ignore: (relPath: string) => boolean = () => false
   private store?: StateStore
-  private watcher?: FSWatcher
+  private stopWatching?: () => void
   private saveTimer?: NodeJS.Timeout
   private running = false
   private startedAt = ''
@@ -99,6 +106,7 @@ export class WatchSession {
     this.link = options.link
     this.transport = options.transport
     this.config = options.config
+    this.tree = options.tree ?? localTree
     this.logger = options.logger
     this.onEvent = options.onEvent
     for (const doc of options.docs) {
@@ -138,12 +146,17 @@ export class WatchSession {
     }
   }
 
-  /** Join the project, load the baseline, attach fs + socket listeners. */
+  /** Absolute path of a project-relative document inside the linked tree. */
+  private abs(relPath: string): string {
+    return this.tree.join(this.link.localRoot, ...relPath.split('/'))
+  }
+
+  /** Join the project, load the baseline, attach tree + socket listeners. */
   async start(): Promise<void> {
     if (this.running) return
-    const store = await StateStore.load(this.link.projectId, this.link.localRoot)
+    const store = await StateStore.load(this.link.projectId, this.link.localRoot, this.link.host)
     this.store = store
-    this.ignore = await loadIgnoreMatcher(this.link.localRoot, this.link.exclude)
+    this.ignore = await loadIgnoreMatcher(this.link.localRoot, this.link.exclude, this.tree)
     this.running = true
     this.startedAt = new Date().toISOString()
 
@@ -157,18 +170,19 @@ export class WatchSession {
     )
 
     try {
-      this.watcher = watch(this.link.localRoot, { recursive: true }, (_event, filename) => {
-        if (typeof filename !== 'string' || filename.length === 0) return
-        this.scheduleFile(filename.replaceAll('\\', '/'))
-      })
-      this.watcher.on('error', (error: unknown) => this.fail(error))
+      this.stopWatching = this.tree.watch(
+        this.link.localRoot,
+        [...this.docsByPath.keys()],
+        (relPath) => this.scheduleFile(relPath),
+        (error: unknown) => this.fail(error),
+      )
     } catch (error) {
       this.fail(error)
       throw error
     }
 
     this.record('started', undefined, `${this.docsByPath.size} documents`)
-    this.logger?.info(`watching ${this.link.localRoot} (${this.docsByPath.size} docs)`)
+    this.logger?.info(`watching ${this.tree.describe(this.link.localRoot)} (${this.docsByPath.size} docs)`)
   }
 
   /** Detach everything, leave every open document, keep the baseline. */
@@ -180,11 +194,11 @@ export class WatchSession {
     if (this.saveTimer) clearTimeout(this.saveTimer)
     this.saveTimer = undefined
     try {
-      this.watcher?.close()
+      this.stopWatching?.()
     } catch {
       // closing an already-closed watcher is not an error
     }
-    this.watcher = undefined
+    this.stopWatching = undefined
     for (const unsubscribe of this.unsubscribers.splice(0)) {
       try {
         unsubscribe()
@@ -199,7 +213,7 @@ export class WatchSession {
 
   // ------------------------------------------------------------- local changes
 
-  /** Debounce one fs event; `throttleMs` is the per-file coalescing window. */
+  /** Debounce one change; `throttleMs` is the per-file coalescing window. */
   private scheduleFile(relPath: string): void {
     if (!this.running) return
     const key = relPath.toLowerCase()
@@ -227,8 +241,7 @@ export class WatchSession {
     const docId = this.docsByPath.get(normalized)
     if (!docId) return
 
-    const abs = path.join(this.link.localRoot, ...normalized.split('/'))
-    const localText = await readTextIfExists(abs)
+    const localText = await this.tree.readText(this.abs(normalized))
     if (localText === undefined) return
     const localHash = sha256(normalizeEol(localText))
     const store = this.store
@@ -237,17 +250,20 @@ export class WatchSession {
     if (baseline && baseline.localHash === localHash) return
 
     const doc = await this.openDoc(docId, normalized)
-    if (sha256(normalizeEol(doc.text)) === localHash) return
-
     const remoteHash = sha256(normalizeEol(doc.text))
+    if (remoteHash === localHash) return
+
     if (baseline?.remoteHash !== undefined && baseline.remoteHash !== remoteHash) {
       // Both sides moved since the last sync: archive instead of clobbering.
+      // Without a baseline the remote has not "moved" as far as this folder
+      // knows, so the local edit goes through and becomes the first baseline.
       const copy = await writeTextConflict({
         link: this.link,
         relPath: normalized,
         localText,
         remoteText: doc.text,
-        meta: { reason: 'remote-changed', remoteVersion: doc.version },
+        meta: { reason: 'remote-changed', remoteVersion: doc.version, docId },
+        tree: this.tree,
       })
       this.record('conflict', normalized, `remote changed; copy: ${copy}`)
       return
@@ -286,8 +302,7 @@ export class WatchSession {
     }
     const nextText = applyOps(doc.text, update.ops)
     const nextHash = sha256(normalizeEol(nextText))
-    const abs = path.join(this.link.localRoot, ...doc.relPath.split('/'))
-    const localText = await readTextIfExists(abs)
+    const localText = await this.tree.readText(this.abs(doc.relPath))
     const localHash = localText === undefined ? undefined : sha256(normalizeEol(localText))
     const store = this.store
     const baseline = store?.get(doc.relPath)
@@ -299,13 +314,14 @@ export class WatchSession {
         relPath: doc.relPath,
         localText,
         remoteText: nextText,
-        meta: { reason: 'local-changed', remoteVersion: update.version },
+        meta: { reason: 'local-changed', remoteVersion: update.version, docId: doc.docId },
+        tree: this.tree,
       })
       this.record('conflict', doc.relPath, `local edits pending; copy: ${copy}`)
       return
     }
 
-    await atomicWrite(abs, nextText)
+    await this.tree.writeText(this.abs(doc.relPath), nextText)
     doc.text = nextText
     doc.version = update.version
     doc.usedAt = Date.now()

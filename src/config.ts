@@ -50,8 +50,15 @@ export const ConfigSchema = z.object({
         .default(20)
         .volatile()
         .description('Upper bound of simultaneously joined documents.'),
+      pollMs: z
+        .natural()
+        .default(3000)
+        .volatile()
+        .description(
+          'How often a folder on an SSH host is polled for local edits (this machine uses OS file events instead).',
+        ),
     })
-    .default({ autoStart: false, idleLeaveDocMs: 60000, maxOpenDocs: 20 })
+    .default({ autoStart: false, idleLeaveDocMs: 60000, maxOpenDocs: 20, pollMs: 3000 })
     .description('Background (watch) mode settings.'),
 
   git: z
@@ -109,7 +116,7 @@ export interface Config {
   baseUrl: string
   localRootPattern: string
   defaultStrategy: ConflictStrategy
-  watch: { autoStart: boolean; idleLeaveDocMs: number; maxOpenDocs: number }
+  watch: { autoStart: boolean; idleLeaveDocMs: number; maxOpenDocs: number; pollMs: number }
   git: { autoInit: boolean; autoCommit: boolean; initialCommitMessage: string; includeBinaryInFirstCommit: boolean }
   journal: { enabled: boolean; keepDays: number }
   confirmRemoteWrite: boolean
@@ -263,6 +270,15 @@ export const EDITABLE_FIELDS: readonly EditableField[] = [
     description: 'Maximum simultaneously joined docs.',
     min: 1,
     max: 200,
+  },
+  {
+    key: 'watch.pollMs',
+    label: '云端目录轮询间隔（毫秒）',
+    type: 'number',
+    group: 'advanced',
+    description: 'How often a folder on an SSH host is polled for local edits.',
+    min: 500,
+    max: 600_000,
   },
   { key: 'journal.enabled', label: '启用同步流水', type: 'boolean', group: 'advanced', description: 'Append events to the journal.' },
   {

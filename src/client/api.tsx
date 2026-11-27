@@ -65,6 +65,17 @@ export interface PushSummary {
   conflicts: string[]
 }
 
+/** A folder on an SSH host: `host` is set, and `localRoot` names a directory there. */
+export interface LocationView {
+  localRoot: string
+  host?: string
+}
+
+/** `host:path`, or the path alone for a folder on this machine. */
+export function displayLocation(location: LocationView): string {
+  return location.host === undefined ? location.localRoot : `${location.host}:${location.localRoot}`
+}
+
 export interface StatusSummary {
   baseUrl: string
   authenticated: boolean
@@ -72,10 +83,9 @@ export interface StatusSummary {
     hint?: string
     savedAt?: string
   }
-  current?: {
+  current?: LocationView & {
     projectId: string
     projectName: string
-    localRoot: string
     files: number
     remoteVersion?: string
     lastPullAt?: string
@@ -85,18 +95,20 @@ export interface StatusSummary {
       head?: string
     }
   }
-  projects: Array<{
-    projectId: string
-    projectName: string
-    localRoot: string
-    files: number
-    linkedAt: string
-  }>
+  projects: Array<LocationView & { projectId: string; projectName: string; files: number; linkedAt: string }>
   pending: {
     localChanges: number
     conflicts: number
+    /** Set when the count could not be read (typically: the SSH host is unreachable). */
+    error?: string
   }
   text: string
+}
+
+/** `hosts` → SSH hosts a link can point at (dsh-cloud-workspaces). */
+export interface HostsView {
+  available: boolean
+  hosts: Array<{ alias: string; host?: string; user?: string; description?: string }>
 }
 
 /** `projects` → ProjectListEntry (note: a different shape from `StatusSummary.projects`). */
@@ -160,10 +172,9 @@ export interface LogoutView {
 }
 
 /** `link` → LinkRecord (only the fields the settings page reads). */
-export interface LinkRecord {
+export interface LinkRecord extends LocationView {
   projectId: string
   projectName?: string
-  localRoot: string
   files?: number
   linkedAt?: string
 }
@@ -185,6 +196,7 @@ export interface WatchView {
   projectId?: string
   projectName?: string
   localRoot?: string
+  host?: string
   openDocs: number
   startedAt?: string
   lastEventAt?: string

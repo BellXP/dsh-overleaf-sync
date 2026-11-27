@@ -24,6 +24,7 @@ const FIELD_LABELS: Record<string, OverleafLocaleKey> = {
   'watch.autoStart': 'watchAutoStart',
   'watch.idleLeaveDocMs': 'watchIdleLeaveDocMs',
   'watch.maxOpenDocs': 'watchMaxOpenDocs',
+  'watch.pollMs': 'watchPollMs',
   'journal.enabled': 'journalEnabled',
   'journal.keepDays': 'journalKeepDays',
   debug: 'debug',

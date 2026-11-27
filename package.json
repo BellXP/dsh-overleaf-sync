@@ -1,6 +1,6 @@
 {
   "name": "dsh-overleaf-sync",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Sync a local LaTeX folder with an Overleaf project from DeepSeek Harness: pull, push, diff, watch — plus automatic git init after the first pull.",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,9 @@
     "dsh-plugin",
     "overleaf",
     "latex",
-    "sync"
+    "sync",
+    "ssh",
+    "cloud-workspaces"
   ],
   "license": "MIT",
   "repository": {

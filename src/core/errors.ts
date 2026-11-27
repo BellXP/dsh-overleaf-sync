@@ -17,6 +17,10 @@ export type OverleafErrorCode =
   | 'E_GIT_INIT_FAILED'
   | 'E_GIT_BROKEN'
   | 'E_CONFIG'
+  /** An SSH-host link was asked for, but no such host (or no `ssh` service) exists. */
+  | 'E_HOST_UNAVAILABLE'
+  /** The SSH host of a link could not be reached. */
+  | 'E_HOST_UNREACHABLE'
   // GUI surface (M4a): HTTP-facing codes, see docs/m4a-api-contract.md.
   | 'E_AUTH_INVALID'
   | 'E_VALIDATION'

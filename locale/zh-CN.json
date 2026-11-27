@@ -31,6 +31,12 @@
   "pickedPath": "已选择 {path}",
   "validating": "校验中…",
   "useDefaultButton": "用默认",
+  "targetLabel": "目录位置",
+  "targetLocal": "本机目录",
+  "targetHost": "云端主机（SSH）",
+  "remoteRootLabel": "云端目录",
+  "remoteRootHint": "路径是所选 SSH 主机上的目录，~ 指向该主机的家目录。文件经 SSH 读写，服务器不需要能访问 Overleaf。",
+  "hostsUnavailable": "未加载云端工作区插件（dsh-cloud-workspaces），只能同步到本机目录。",
   "linkButton": "绑定",
   "linking": "绑定中…",
   "linkedFiles": "远端 {count} 个文件",
@@ -61,6 +67,7 @@
   "watchAutoStart": "打开文档时自动监听",
   "watchIdleLeaveDocMs": "空闲离开文档（毫秒）",
   "watchMaxOpenDocs": "同时监听文档上限",
+  "watchPollMs": "云端目录轮询间隔（毫秒）",
   "journalEnabled": "启用操作日志",
   "journalKeepDays": "日志保留天数",
   "debug": "调试日志",
@@ -141,5 +148,6 @@
   "sbResolveMerge": "合并",
   "sbResolveHint": "解决后会记录新的基线；选择「合并」会在文件里写入冲突标记。",
   "sbResolved": "已解决 {count} 个冲突",
-  "sbResolveNone": "已没有未解决的冲突"
+  "sbResolveNone": "已没有未解决的冲突",
+  "pendingUnavailable": "无法统计云端目录的改动：{error}"
 }

@@ -5,11 +5,13 @@ import type { ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  displayLocation,
   isMissingRoute,
   post,
   type ApiFailure,
   type ApiResult,
   type FieldValue,
+  type HostsView,
   type LinkRecord,
   type LoginView,
   type LogoutView,
@@ -128,6 +130,7 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
   const [view, setView] = useState<SettingsView | null>(null)
   const [draft, setDraft] = useState<Record<string, DraftValue>>({})
   const [projects, setProjects] = useState<ProjectListEntry[]>([])
+  const [hosts, setHosts] = useState<HostsView | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -181,10 +184,11 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
     abortRef.current = controller
     void (async () => {
       setLoading(true)
-      const [statusResult, settingsResult, projectsResult] = await Promise.all([
+      const [statusResult, settingsResult, projectsResult, hostsResult] = await Promise.all([
         post<StatusSummary>('status', {}, controller.signal),
         post<SettingsView>('settings.describe', {}, controller.signal),
         post<ProjectListEntry[]>('projects', {}, controller.signal),
+        post<HostsView>('hosts', {}, controller.signal),
       ])
       if (controller.signal.aborted) return
       setLoading(false)
@@ -201,6 +205,9 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
       if (statusResult.ok) setStatus(statusResult.value)
       else noteFailure(statusResult)
       if (projectsResult.ok) setProjects(projectsResult.value)
+      // An older host half has no `hosts` route: that simply means "this machine only".
+      if (hostsResult.ok) setHosts(hostsResult.value)
+      else setHosts({ available: false, hosts: [] })
       if (settingsResult.ok) {
         setLoadFailure(null)
         applyView(settingsResult.value)
@@ -278,7 +285,7 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
   }, [noteFailure])
 
   const validatePath = useCallback(
-    async (payload: { path: string; projectId?: string }): Promise<ApiResult<PathValidation>> => {
+    async (payload: { path: string; projectId?: string; host?: string }): Promise<ApiResult<PathValidation>> => {
       setBusy('validate')
       const result = await post<PathValidation>('validate-path', payload)
       setBusy(null)
@@ -340,7 +347,7 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
   )
 
   const link = useCallback(
-    async (payload: { projectId: string; localRoot?: string; force?: boolean }): Promise<ApiResult<LinkRecord>> => {
+    async (payload: { projectId: string; localRoot?: string; host?: string; force?: boolean }): Promise<ApiResult<LinkRecord>> => {
       setBusy('link')
       setNotice(null)
       const result = await post<LinkRecord>('link', payload)
@@ -350,7 +357,7 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
         // Linking only records the pair; pulling stays an explicit action.
         // A slow or failing pull on a self-hosted server must not look like
         // "the link failed", and nobody expects files to appear unasked.
-        setNotice({ tone: 'ok', text: t('linkedOnly', { root: result.value.localRoot }) })
+        setNotice({ tone: 'ok', text: t('linkedOnly', { root: displayLocation(result.value) }) })
         return result
       }
       // The force confirmation is rendered by the project block; keep it quiet here.
@@ -449,6 +456,7 @@ export function OverleafSettingsSection(props: PanelProps): ReactNode {
           t={t}
           status={status}
           projects={projects}
+          hosts={hosts}
           pattern={pattern}
           disabled={!hostReady}
           busy={busy === 'projects' || busy === 'validate' || busy === 'link' || busy === 'pick'}

@@ -4,11 +4,16 @@
  * The plugin only registers tools; all policy lives in `service.ts` and all
  * protocol details in `transport/`. Everything is created inside `ctx.effect`,
  * so a hot reload disposes the registrations cleanly.
+ *
+ * Two services are optional and picked up late, so load order does not matter:
+ * `ssh` (dsh-cloud-workspaces) lets a link point at a folder on an SSH host,
+ * and `webServer` carries the GUI's routes.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 
 import { ConfigSchema, liveConfig, type Config as ResolvedConfig } from './config.js'
+import { isSshRuntime, type SshRuntimeLike } from './core/tree-ssh.js'
 import { OverleafSyncService } from './service.js'
 import { createOverleafTools } from './tools/index.js'
 import { registerOverleafApi } from './server/index.js'
@@ -35,6 +40,17 @@ export function apply(ctx: Context, input?: Partial<ResolvedConfig>): void {
         void service.stopAllWatches()
       }
     })
+  })
+
+  // SSH hosts come from dsh-cloud-workspaces. Never a hard dependency: without
+  // it every link is simply a folder on this machine, as before.
+  ctx.inject(['ssh'], (sctx) => {
+    const ssh: unknown = (sctx as unknown as { ssh?: unknown }).ssh
+    if (!isSshRuntime(ssh)) return
+    sctx.effect(() => {
+      service.attachSsh(ssh)
+      return () => service.detachSsh(ssh)
+    }, 'overleaf-sync: ssh runtime')
   })
 
   // `watch.autoStart` is opt-in. The delayed start keeps plugin loading cheap and

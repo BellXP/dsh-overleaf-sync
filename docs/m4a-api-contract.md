@@ -26,9 +26,10 @@
 | `/overleaf/api/login` | `{ cookie, csrfToken?, baseUrl? }` | `{ baseUrl, hint? }` |
 | `/overleaf/api/logout` | `{}` | `{}` |
 | `/overleaf/api/projects` | `{ refresh?: boolean }` | `ProjectListEntry[]` |
-| `/overleaf/api/validate-path` | `{ path: string, projectId?: string }` | `{ ok, resolved, problems: string[] }` |
+| `/overleaf/api/hosts` | `{}` | `{ available: boolean, hosts: Array<{ alias, host?, user?, description? }> }`（SSH 主机；未装 dsh-cloud-workspaces 时 `available: false`） |
+| `/overleaf/api/validate-path` | `{ path: string, projectId?: string, host?: string }` | `{ ok, resolved, problems: string[] }`（带 `host` 时在 SSH 主机上检查） |
 | `/overleaf/api/pick-directory` | `{ probe?: boolean }` | `{ kind: 'native' \| 'browse' \| 'unavailable', path: string \| null }` |
-| `/overleaf/api/link` | `{ projectId: string, localRoot?: string }` | `LinkRecord` |
+| `/overleaf/api/link` | `{ projectId: string, localRoot?: string, host?: string, force?: boolean }` | `LinkRecord`（目录在 `host` 上时带 `host` 字段） |
 | `/overleaf/api/pull` | `{ projectId?: string, force?: boolean }` | `PullSummary` |
 | `/overleaf/api/push` | `{ projectId?: string, dryRun?: boolean }` | `PushSummary` |
 | `/overleaf/api/diff` | `{ projectId?: string, path: string }` | `DiffSummary` |
@@ -44,6 +45,8 @@
 | `/overleaf/events` | `GET` | `text/event-stream`；帧见 §2.4 |
 
 `ProjectListEntry` / `LinkRecord` / `PullSummary` / `PushSummary` / `DiffSummary` 的形状与 `src/service.ts` 的同名类型一致，字段名原样透传。
+
+带 `host` 的请求把目录理解成该 SSH 主机（dsh-cloud-workspaces 的 `ssh` 服务）上的路径：`link` 的「目录非空」确认只针对本机磁盘，云端目录由 `pull` 的首次同步规则保护（README「云端目录」）；`status` 的 `current` / `projects[]` 与 `watch` 都带 `host`；`pending.error` 在主机连不上、无法统计待推送数时给出原因（此时的 `0` 只表示未知，不是没有改动）。云端链接的待推送数经一次 `sha256sum` 批量取得，并按项目缓存 3 秒。
 
 `pick-directory` 由宿主可选的 `ctx.directoryPicker` 支撑（桌面端解析为 `native`，即系统「选择文件夹」对话框）：
 - `probe: true` 只回答能力，不弹窗 —— 页面加载时用它决定显示「选择目录」还是「校验路径」；

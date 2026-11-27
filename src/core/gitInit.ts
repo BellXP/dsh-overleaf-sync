@@ -1,22 +1,25 @@
 /**
- * Local git convenience (design §5.8).
+ * Git convenience for the linked folder (design §5.8).
  *
  * After the first full pull we may put the freshly written project under local
  * version control. Git is **never** part of the sync protocol and every failure
  * downgrades gracefully: `ensureGitRepository` always resolves, returning a
  * `warning` instead of throwing, because a pull that succeeded must never be
  * reported as failed just because `git` is missing or unhappy.
+ *
+ * The repository lives wherever the files are: in the folder on this machine,
+ * or in the folder on the SSH host the link points at (`tree`).
  */
 
-import { spawn } from 'node:child_process'
-import { realpathSync } from 'node:fs'
-import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import type { GitInitResult } from '../types.js'
-import { atomicWrite, listFilesRecursive, pathExists, readTextIfExists } from './fsUtil.js'
+import { localTree, type TreeEntry, type TreeIo } from './tree.js'
 
-/** Runs `git <args>` in `cwd`. Injected by tests; the default shells out to PATH. */
+/**
+ * Runs `git <args>` in `cwd`. Injected by tests; the default shells out to PATH,
+ * or to the host's own `git` when the tree lives on an SSH host.
+ */
 export interface GitSpawn {
   (args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }>
 }
@@ -30,6 +33,8 @@ export interface EnsureGitOptions {
   initialCommitMessage?: string
   /** Put images/PDFs into the first commit even for large projects. */
   includeBinary?: boolean
+  /** Where the files are; defaults to this machine's disk. */
+  tree?: TreeIo
   /** Test injection point. */
   spawn?: GitSpawn
   now?: Date
@@ -58,26 +63,7 @@ interface RunResult {
 type StageOutcome = { ok: true; count: number } | { ok: false; result: GitInitResult }
 
 /** Real `git` invocation. Never rejects for a non-zero exit — only for spawn errors. */
-const defaultGitSpawn: GitSpawn = (args, cwd) =>
-  new Promise((resolve, reject) => {
-    const child = spawn('git', args, {
-      cwd,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-    child.stdout?.setEncoding('utf8')
-    child.stderr?.setEncoding('utf8')
-    child.stdout?.on('data', (chunk: string) => {
-      stdout += chunk
-    })
-    child.stderr?.on('data', (chunk: string) => {
-      stderr += chunk
-    })
-    child.on('error', (err) => reject(err))
-    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }))
-  })
+const defaultGitSpawn: GitSpawn = (args, cwd) => localTree.run(cwd, 'git', args)
 
 async function runGit(git: GitSpawn, args: string[], cwd: string): Promise<RunResult> {
   try {
@@ -87,6 +73,16 @@ async function runGit(git: GitSpawn, args: string[], cwd: string): Promise<RunRe
     const spawnError = (typeof err === 'object' && err !== null ? err : new Error(String(err))) as NodeJS.ErrnoException
     return { code: SPAWN_FAILURE_CODE, stdout: '', stderr: errorText(err), spawnError }
   }
+}
+
+/** `git` where the files are: this machine's PATH, or the host of a remote tree. */
+function gitSpawnFor(tree: TreeIo): GitSpawn {
+  return tree.kind === 'ssh' ? (args, cwd) => tree.run(cwd, 'git', args) : defaultGitSpawn
+}
+
+/** The root as this machine paths see it, or as the host does (never with a drive letter). */
+function rootOf(localRoot: string, tree: TreeIo): string {
+  return tree.kind === 'ssh' ? path.posix.normalize(localRoot) : path.resolve(localRoot)
 }
 
 /**
@@ -100,8 +96,9 @@ export async function ensureGitRepository(options: EnsureGitOptions): Promise<Gi
   }
 
   const now = options.now ?? new Date()
-  const root = path.resolve(options.localRoot)
-  const git = options.spawn ?? defaultGitSpawn
+  const tree = options.tree ?? localTree
+  const root = rootOf(options.localRoot, tree)
+  const git = options.spawn ?? gitSpawnFor(tree)
 
   try {
     const top = await runGit(git, ['rev-parse', '--show-toplevel'], root)
@@ -109,10 +106,10 @@ export async function ensureGitRepository(options: EnsureGitOptions): Promise<Gi
 
     if (top.code === 0) {
       const toplevel = parseToplevel(top.stdout)
-      if (toplevel !== '' && sameDirectory(toplevel, root)) {
+      if (toplevel !== '' && (await sameDirectory(toplevel, root, tree))) {
         // Already a repository of its own: only top up the ignore files.
         try {
-          await ensureGitMetadata(root)
+          await ensureGitMetadata(root, tree)
         } catch (err) {
           return {
             mode: 'own',
@@ -127,12 +124,12 @@ export async function ensureGitRepository(options: EnsureGitOptions): Promise<Gi
       return {
         mode: 'parent',
         created: false,
-        ...(toplevel === '' ? {} : { root: path.resolve(toplevel) }),
+        ...(toplevel === '' ? {} : { root: rootOf(toplevel, tree) }),
       }
     }
 
     // `rev-parse` failed. An existing (but unusable) `.git` is never deleted.
-    if (await pathExists(path.join(root, '.git'))) {
+    if (await tree.exists(tree.join(root, '.git'))) {
       return {
         mode: 'none',
         created: false,
@@ -149,9 +146,9 @@ export async function ensureGitRepository(options: EnsureGitOptions): Promise<Gi
       if (init.code !== 0) return initFailedResult(init)
     }
 
-    await ensureGitMetadata(root)
+    await ensureGitMetadata(root, tree)
 
-    const staged = await stageInitialCommit(git, root, options.includeBinary === true)
+    const staged = await stageInitialCommit(git, root, options.includeBinary === true, tree)
     if (!staged.ok) return staged.result
 
     const identity = await resolveIdentity(git, root)
@@ -191,7 +188,9 @@ function isGitUnavailable(run: RunResult): boolean {
   if (run.spawnError !== undefined && (run.spawnError.code === 'ENOENT' || run.spawnError.code === 'EACCES')) {
     return true
   }
-  return /ENOENT/.test(run.stderr) && run.code === SPAWN_FAILURE_CODE
+  if (/ENOENT/.test(run.stderr) && run.code === SPAWN_FAILURE_CODE) return true
+  // A remote shell answers "command not found" with exit status 127.
+  return run.code === SPAWN_FAILURE_CODE && /command not found|not found/i.test(run.stderr)
 }
 
 /** `git rev-parse` may quote paths that contain special characters. */
@@ -207,22 +206,15 @@ function parseToplevel(stdout: string): string {
   return value
 }
 
-function sameDirectory(a: string, b: string): boolean {
-  // git prints the canonical path (long names on Windows); a caller-supplied root
-  // may carry an 8.3 short name (e.g. %TEMP%\...), so canonicalize both sides
-  // through the real path before comparing, falling back to the lexical form.
-  const canonical = (value: string): string => {
-    try {
-      return realpathSync.native(value)
-    } catch {
-      return value
-    }
-  }
-  const left = canonical(path.resolve(a))
-  const right = canonical(path.resolve(b))
+async function sameDirectory(a: string, b: string, tree: TreeIo): Promise<boolean> {
+  // git prints the canonical path. On Windows a caller-supplied root may carry
+  // an 8.3 short name (e.g. %TEMP%\...), and on a host the folder may be reached
+  // through a symlink: canonicalize both sides before comparing, falling back
+  // to the lexical form.
+  const [left, right] = await Promise.all([tree.canonical(rootOf(a, tree)), tree.canonical(rootOf(b, tree))])
   const normalize = (value: string): string => {
     const trimmed = value.length > 3 ? value.replace(/[\\/]+$/, '') : value
-    return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed
+    return tree.kind === 'local' && process.platform === 'win32' ? trimmed.toLowerCase() : trimmed
   }
   return normalize(left) === normalize(right)
 }
@@ -244,24 +236,24 @@ function firstLine(text: string): string {
  * Write/append `.gitignore` + `.gitattributes` without ever clobbering user
  * content: only missing entries are added, under a recognizable marker.
  */
-async function ensureGitMetadata(root: string): Promise<void> {
-  const ignoreFile = path.join(root, '.gitignore')
-  const existing = (await readTextIfExists(ignoreFile)) ?? ''
+async function ensureGitMetadata(root: string, tree: TreeIo): Promise<void> {
+  const ignoreFile = tree.join(root, '.gitignore')
+  const existing = (await tree.readText(ignoreFile)) ?? ''
   const missing = GITIGNORE_ENTRIES.filter((entry) => !hasIgnoreEntry(existing, entry))
   if (missing.length > 0) {
-    await atomicWrite(ignoreFile, appendIgnoreEntries(existing, missing))
+    await tree.writeText(ignoreFile, appendIgnoreEntries(existing, missing))
   }
 
-  const attributesFile = path.join(root, '.gitattributes')
-  const attributes = await readTextIfExists(attributesFile)
+  const attributesFile = tree.join(root, '.gitattributes')
+  const attributes = await tree.readText(attributesFile)
   if (attributes === undefined) {
-    await atomicWrite(attributesFile, `${GITATTRIBUTES_LINE}\n`)
+    await tree.writeText(attributesFile, `${GITATTRIBUTES_LINE}\n`)
     return
   }
   if (!hasAttributeLine(attributes)) {
     let next = attributes.replace(/\r\n/g, '\n')
     if (next.length > 0 && !next.endsWith('\n')) next += '\n'
-    await atomicWrite(attributesFile, `${next}${GITATTRIBUTES_LINE}\n`)
+    await tree.writeText(attributesFile, `${next}${GITATTRIBUTES_LINE}\n`)
   }
 }
 
@@ -298,11 +290,17 @@ function appendIgnoreEntries(existing: string, missing: string[]): string {
 }
 
 /** Stage the first commit, degrading to text files for large media-heavy trees. */
-async function stageInitialCommit(git: GitSpawn, root: string, includeBinary: boolean): Promise<StageOutcome> {
-  const files = await listFilesRecursive(root)
+async function stageInitialCommit(
+  git: GitSpawn,
+  root: string,
+  includeBinary: boolean,
+  tree: TreeIo,
+): Promise<StageOutcome> {
+  const entries = await tree.listTree(root)
+  const files = entries.map((entry) => entry.rel)
   let fallbackCount = files.length
 
-  const tooLarge = includeBinary ? false : await exceedsLargeProjectLimits(root, files)
+  const tooLarge = includeBinary ? false : exceedsLargeProjectLimits(entries)
   if (!tooLarge) {
     const add = await runGit(git, ['add', '-A'], root)
     if (isGitUnavailable(add)) return { ok: false, result: unavailableResult() }
@@ -327,32 +325,9 @@ async function stageInitialCommit(git: GitSpawn, root: string, includeBinary: bo
   return { ok: true, count: fallbackCount }
 }
 
-async function exceedsLargeProjectLimits(root: string, files: string[]): Promise<boolean> {
-  if (files.length > LARGE_PROJECT_FILES) return true
-  const largest = await largestFileSize(root, files)
-  return largest > LARGE_FILE_BYTES
-}
-
-/** Largest file size, stat'ed in bounded parallel batches (large repos stay fast). */
-async function largestFileSize(root: string, files: string[]): Promise<number> {
-  let largest = 0
-  for (let index = 0; index < files.length; index += 64) {
-    const batch = files.slice(index, index + 64)
-    const sizes = await Promise.all(
-      batch.map(async (rel) => {
-        try {
-          const stat = await fs.stat(path.join(root, rel))
-          return stat.isFile() ? stat.size : 0
-        } catch {
-          return 0
-        }
-      }),
-    )
-    for (const size of sizes) {
-      if (size > largest) largest = size
-    }
-  }
-  return largest
+function exceedsLargeProjectLimits(entries: TreeEntry[]): boolean {
+  if (entries.length > LARGE_PROJECT_FILES) return true
+  return entries.some((entry) => entry.size > LARGE_FILE_BYTES)
 }
 
 /** `git config user.name/email` if set, else the plugin's throwaway identity. */

@@ -9,9 +9,7 @@
  * since the matcher is normally called with file paths only.
  */
 
-import path from 'node:path'
-
-import { readTextIfExists } from './fsUtil.js'
+import { localTree, type TreeIo } from './tree.js'
 
 /** Ignore rules that always apply, before the project file and `exclude`. */
 export const BUILTIN_IGNORES: string[] = [
@@ -133,9 +131,10 @@ export function createIgnoreMatcher(options: { patterns: string[] }): (relPosix:
 export async function loadIgnoreMatcher(
   localRoot: string,
   extra?: string[],
+  tree: TreeIo = localTree,
 ): Promise<(relPosix: string) => boolean> {
   const patterns = [...BUILTIN_IGNORES]
-  const text = await readTextIfExists(path.join(localRoot, IGNORE_FILE_NAME))
+  const text = await tree.readText(tree.join(localRoot, IGNORE_FILE_NAME))
   if (text !== undefined) patterns.push(...parseIgnoreFile(text))
   if (extra !== undefined) patterns.push(...extra)
   return createIgnoreMatcher({ patterns })

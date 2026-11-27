@@ -14,6 +14,7 @@ import { conflictsDir, expandHome, journalPath, linkPath, stateRoot } from '../c
 import { readProjectState } from '../core/stateStore.js'
 import { listFilesRecursive, normalizeEol, readTextIfExists, sha256 } from '../core/fsUtil.js'
 import { loadIgnoreMatcher } from '../core/ignore.js'
+import { localTree, type TreeIo } from '../core/tree.js'
 import { countPendingLocalChanges } from './pending.js'
 import { describeError } from '../core/errors.js'
 import type { Config } from '../config.js'
@@ -33,6 +34,7 @@ import {
 import type { SettingsBridge } from './settingsBridge.js'
 import type {
   ConflictEntry,
+  HostsView,
   JournalEntryView,
   PathValidation,
   PickDirectoryResult,
@@ -76,6 +78,7 @@ export function createOverleafRoutes(deps: RouteDeps): WebRoute[] {
     ['login', (body) => loginView(deps, body)],
     ['logout', () => logoutView(deps)],
     ['projects', (body) => projectsView(deps, body)],
+    ['hosts', () => hostsView(deps)],
     ['validate-path', (body) => validatePath(deps, body)],
     ['pick-directory', (body) => pickDirectoryView(deps, body)],
     ['link', (body) => linkView(deps, body)],
@@ -132,9 +135,11 @@ async function statusView(deps: RouteDeps): Promise<StatusSummary> {
   const credential = await service.credential()
 
   const current = await currentProject(deps)
-  const pending = { localChanges: 0, conflicts: 0 }
+  const pending: StatusSummary['pending'] = { localChanges: 0, conflicts: 0 }
   if (current !== undefined) {
-    pending.localChanges = await countLocalChanges(current.localRoot, current.projectId)
+    const counted = await countLocalChanges(deps, current.localRoot, current.projectId, current.host)
+    pending.localChanges = counted.localChanges
+    if (counted.error !== undefined) pending.error = counted.error
     pending.conflicts = (await listConflicts(deps, current.projectId, deps.config.defaultStrategy)).length
   }
 
@@ -152,6 +157,7 @@ async function statusView(deps: RouteDeps): Promise<StatusSummary> {
       projectId: entry.projectId,
       projectName: entry.projectName,
       localRoot: entry.localRoot,
+      ...(entry.host !== undefined ? { host: entry.host } : {}),
       files: entry.files,
       linkedAt: entry.linkedAt,
     })),
@@ -183,6 +189,7 @@ async function currentProject(
     projectId: link.projectId,
     projectName: link.projectName,
     localRoot: link.localRoot,
+    ...(link.host !== undefined ? { host: link.host } : {}),
     files: Object.keys(state?.files ?? {}).length,
   }
   if (remoteVersions.length > 0) current.remoteVersion = Math.max(...remoteVersions)
@@ -199,7 +206,9 @@ async function currentProject(
  * disappeared. Best-effort: an unreadable project reports `0` instead of
  * failing the whole status call.
  */
-async function readLinkRecord(projectId: string): Promise<{ exclude: string[]; localRoot: string } | undefined> {
+async function readLinkRecord(
+  projectId: string,
+): Promise<{ exclude: string[]; localRoot: string; host?: string } | undefined> {
   const text = await readTextIfExists(linkPath(projectId))
   if (text === undefined) return undefined
   try {
@@ -207,27 +216,69 @@ async function readLinkRecord(projectId: string): Promise<{ exclude: string[]; l
     if (parsed === null || typeof parsed !== 'object') return undefined
     const record = parsed as Record<string, unknown>
     const localRoot = typeof record.localRoot === 'string' ? record.localRoot : ''
+    const host = typeof record.host === 'string' && record.host !== '' ? record.host : undefined
     const exclude = Array.isArray(record.exclude)
       ? record.exclude.filter((item): item is string => typeof item === 'string')
       : []
     if (localRoot === '') return undefined
-    return { exclude, localRoot }
+    return { exclude, localRoot, ...(host !== undefined ? { host } : {}) }
   } catch {
     return undefined
   }
 }
 
-async function countLocalChanges(localRoot: string, projectId: string): Promise<number> {
+interface PendingCount {
+  localChanges: number
+  /** why the number is missing instead of merely zero */
+  error?: string
+}
+
+/** The panel re-reads on every state change; a folder on an SSH host is asked at most this often. */
+const REMOTE_COUNT_TTL_MS = 3000
+const remoteCountMemo = new Map<string, { at: number; value: PendingCount }>()
+
+async function countLocalChanges(
+  deps: RouteDeps,
+  localRoot: string,
+  projectId: string,
+  host?: string,
+): Promise<PendingCount> {
+  if (host === undefined) return countLocalChangesOnce(deps, localRoot, projectId, host)
+  const cached = remoteCountMemo.get(projectId)
+  if (cached !== undefined && Date.now() - cached.at < REMOTE_COUNT_TTL_MS) return cached.value
+  const value = await countLocalChangesOnce(deps, localRoot, projectId, host)
+  remoteCountMemo.set(projectId, { at: Date.now(), value })
+  return value
+}
+
+async function countLocalChangesOnce(
+  deps: RouteDeps,
+  localRoot: string,
+  projectId: string,
+  host?: string,
+): Promise<PendingCount> {
   const state = await readProjectState(projectId)
-  if (state === undefined) return 0
+  if (state === undefined) return { localChanges: 0 }
+  const tree = treeOf(deps, host)
   let ignore: ((relPath: string) => boolean) | undefined
   try {
     const link = await readLinkRecord(projectId)
-    ignore = await loadIgnoreMatcher(localRoot, link?.exclude)
+    ignore = await loadIgnoreMatcher(localRoot, link?.exclude, tree)
   } catch {
     ignore = undefined
   }
-  return await countPendingLocalChanges(state, localRoot, ignore)
+  try {
+    return { localChanges: await countPendingLocalChanges(state, localRoot, ignore, tree) }
+  } catch (err) {
+    // An unreachable host must not blank the whole panel; say why the number is missing.
+    return { localChanges: 0, error: describeError(err) }
+  }
+}
+
+/** The tree a link's files live in; a service without the method (an older host) means this machine. */
+function treeOf(deps: RouteDeps, host?: string): TreeIo {
+  const service = deps.service as Partial<OverleafSyncService>
+  return typeof service.tree === 'function' ? service.tree({ host }) : localTree
 }
 
 // --------------------------------------------------------------- credentials
@@ -256,14 +307,27 @@ async function projectsView(deps: RouteDeps, body: Record<string, unknown>): Pro
   return deps.service.listProjects({ cwd: deps.cwd })
 }
 
+/** SSH hosts a link can point at (dsh-cloud-workspaces); `available: false` when that plugin is absent. */
+async function hostsView(deps: RouteDeps): Promise<HostsView> {
+  const service = deps.service as Partial<OverleafSyncService>
+  if (typeof service.listHosts !== 'function') return { available: false, hosts: [] }
+  const hosts = service.listHosts()
+  return hosts === undefined ? { available: false, hosts: [] } : { available: true, hosts }
+}
+
 async function linkView(deps: RouteDeps, body: Record<string, unknown>): Promise<unknown> {
   const projectId = requireString(body, 'projectId')
   const localRoot = optionalString(body, 'localRoot')
+  const host = optionalString(body, 'host')?.trim()
   const force = optionalBoolean(body, 'force') ?? false
-  const input: { projectId: string; localRoot?: string } = { projectId }
+  const input: { projectId: string; localRoot?: string; host?: string } = { projectId }
   if (localRoot !== undefined) input.localRoot = localRoot
+  if (host !== undefined) input.host = host
 
-  if (localRoot !== undefined && !force) {
+  // The "not empty" guard looks at this machine's disk only. A folder on an SSH
+  // host has its own guard: a pull never overwrites a file that differs from
+  // Overleaf before it was ever compared with it.
+  if (localRoot !== undefined && !force && (host === undefined || host === '')) {
     const target = path.resolve(deps.cwd, expandHome(localRoot))
     const nonEmpty = await isNonEmptyDir(target)
     const alreadyOurs = await isLinkedTo(projectId, target)
@@ -315,6 +379,12 @@ async function pickDirectoryView(deps: RouteDeps, body: Record<string, unknown>)
 async function validatePath(deps: RouteDeps, body: Record<string, unknown>): Promise<PathValidation> {
   const raw = requireString(body, 'path')
   const projectId = optionalString(body, 'projectId')
+  const host = optionalString(body, 'host')?.trim()
+  // A folder on an SSH host cannot be seen from here; the service asks the host.
+  if (host !== undefined && host !== '') {
+    const remote = await deps.service.validateRemotePath(host, raw, projectId)
+    return { ok: remote.problems.length === 0, resolved: remote.resolved, problems: remote.problems }
+  }
   const resolved = path.resolve(deps.cwd, expandHome(raw))
   const problems: string[] = []
 
@@ -499,6 +569,7 @@ async function watchView(deps: RouteDeps, body: Record<string, unknown>): Promis
     ...(status.projectId !== undefined ? { projectId: status.projectId } : {}),
     ...(status.projectName !== undefined ? { projectName: status.projectName } : {}),
     ...(status.localRoot !== undefined ? { localRoot: status.localRoot } : {}),
+    ...(status.host !== undefined ? { host: status.host } : {}),
     openDocs: status.openDocs,
     ...(status.startedAt !== undefined ? { startedAt: status.startedAt } : {}),
     ...(status.lastEventAt !== undefined ? { lastEventAt: status.lastEventAt } : {}),

@@ -9,6 +9,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import type { Config } from '../config.js'
 import { describeError, isOverleafError, OverleafSyncError } from '../core/errors.js'
+import { describeLocation } from '../core/paths.js'
 import {
   OverleafSyncService,
   type ConflictsSummary,
@@ -153,13 +154,23 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
   const link = defineTool({
     name: 'overleaf_link',
     description:
-      'Link an Overleaf project to a local folder. Without localRoot the folder is derived from the ' +
-      '`localRootPattern` config (~/Overleaf/<project> by default). Re-linking keeps the existing folder.',
+      'Link an Overleaf project to a project folder — on this machine, or on an SSH host (dsh-cloud-workspaces) with `host`. ' +
+      'Without localRoot the folder is derived from the `localRootPattern` config (~/Overleaf/<project> by default). ' +
+      'Re-linking keeps the existing folder and host.',
     parameters: {
       projectId: { type: 'string', required: true, description: 'Project id from overleaf_projects.' },
+      host: {
+        type: 'string',
+        description:
+          'SSH host alias (as in ssh_list) whose folder holds the project — use it when the paper lives on a cloud ' +
+          'server that runs the experiments. dsh talks to Overleaf itself; the host never needs to reach it. ' +
+          'Omit to keep the current host; "" moves the link back to this machine.',
+      },
       localRoot: {
         type: 'string',
-        description: 'Target folder. Relative paths resolve against the session working directory.',
+        description:
+          'Target folder. Relative paths resolve against the session working directory, or against the host\'s home ' +
+          'directory when `host` is set (`~` is allowed there).',
       },
       include: {
         type: 'array',
@@ -183,6 +194,7 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
         const record = await service.link(
           {
             projectId: args.projectId,
+            ...(args.host !== undefined ? { host: args.host } : {}),
             ...(args.localRoot ? { localRoot: args.localRoot } : {}),
             ...(args.include ? { include: args.include } : {}),
             ...(args.exclude ? { exclude: args.exclude } : {}),
@@ -192,9 +204,12 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
         )
         return asJson({
           text:
-            `Linked "${record.projectName}" (${record.projectId}) → ${record.localRoot}\n` +
+            `Linked "${record.projectName}" (${record.projectId}) → ${describeLocation(record.host, record.localRoot)}\n` +
             `strategy: ${record.strategy} · include: ${(record.include ?? []).join(', ')}\n` +
-            'Next: overleaf_pull to download the project.',
+            (record.host !== undefined
+              ? `files go to ${record.host} over SSH; Overleaf is reached from this machine\n`
+              : '') +
+            'Next: overleaf_pull with dryRun: true to preview, then overleaf_pull to download the project.',
           link: record,
         })
       } catch (error) {
@@ -206,9 +221,10 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
   const pull = defineTool({
     name: 'overleaf_pull',
     description:
-      'Download a linked project (or some of its documents) into the local folder, then create a git repository ' +
-      'on first run when `git.autoInit` is on. Never overwrites files whose local edits are not yet pushed: those ' +
-      'get a conflict copy instead unless `force` is set.',
+      'Download a linked project (or some of its documents) into its folder, then create a git repository on first run ' +
+      'when `git.autoInit` is on. Never overwrites a file whose local edits are not yet pushed, nor a file that was ' +
+      'never compared with Overleaf and differs from it: those get a conflict copy instead (settle with ' +
+      'overleaf_resolve) unless `force` is set. Start with dryRun: true to see the plan.',
     parameters: {
       projectId: { type: 'string', description: 'Defaults to the only linked project.' },
       docs: {
@@ -218,9 +234,9 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
       },
       force: {
         type: 'boolean',
-        description: 'Overwrite locally modified files (a conflict copy is still written first).',
+        description: 'Overwrite local files that differ, including never-synced ones. The overwritten text is archived under the plugin state directory.',
       },
-      dryRun: { type: 'boolean', description: 'Report what would change without touching the disk.' },
+      dryRun: { type: 'boolean', description: 'Report what would change without touching any file.' },
       gitInit: {
         type: 'boolean',
         description: 'Override `git.autoInit` for this call (false = do not create a repository).',
@@ -412,7 +428,7 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
 export function describePush(summary: PushSummary): string {
   const head = summary.dryRun ? `Dry run: ${summary.projectName}` : `Pushed ${summary.projectName}`
   const lines = [
-    `${head} → ${summary.localRoot}`,
+    `${head} → ${summary.location}`,
     `files: ${summary.pushed.length} ${summary.dryRun ? 'to send' : 'sent'} · ${summary.unchanged.length} unchanged · ${summary.skipped.length} skipped`,
   ]
   if (summary.pushed.length > 0) {
@@ -430,7 +446,7 @@ export function describePush(summary: PushSummary): string {
 export function describePull(summary: PullSummary, config: Config): string {
   const head = summary.dryRun ? `Dry run: ${summary.projectName}` : `Pulled ${summary.projectName}`
   const lines = [
-    `${head} → ${summary.localRoot}`,
+    `${head} → ${summary.location}`,
     `files: ${summary.pulled.length} written · ${summary.unchanged.length} unchanged · ${summary.skipped.length} skipped`,
   ]
   if (summary.pulled.length > 0) {
@@ -438,7 +454,10 @@ export function describePull(summary: PullSummary, config: Config): string {
     lines.push(`written: ${shown.join(', ')}${summary.pulled.length > shown.length ? ` … (+${summary.pulled.length - shown.length})` : ''}`)
   }
   if (summary.conflicts.length > 0) {
-    lines.push(`conflicts (${summary.conflicts.length}): ${summary.conflicts.slice(0, 5).join(', ')} — kept the local copy, remote saved as *.remote`)
+    lines.push(
+      `conflicts (${summary.conflicts.length}): ${summary.conflicts.slice(0, 5).join(', ')} — kept the local file, Overleaf copy saved as *.remote-<ts>; ` +
+        `settle each with overleaf_resolve (keep_local pushes the local file, keep_remote takes the Overleaf one)`,
+    )
   }
   if (summary.git) {
     const git = summary.git
@@ -454,16 +473,16 @@ export function describePull(summary: PullSummary, config: Config): string {
 export function describeConflicts(summary: ConflictsSummary): string {
   const { conflicts } = summary
   if (conflicts.length === 0) {
-    return `No unresolved conflicts in "${summary.projectName}" → ${summary.localRoot}.`
+    return `No unresolved conflicts in "${summary.projectName}" → ${summary.location}.`
   }
-  const lines = [`Unresolved conflicts: ${conflicts.length} in "${summary.projectName}" → ${summary.localRoot}`]
+  const lines = [`Unresolved conflicts: ${conflicts.length} in "${summary.projectName}" → ${summary.location}`]
   conflicts.slice(0, 10).forEach((entry, index) => {
     const versions =
       entry.localVersion !== undefined || entry.remoteVersion !== undefined
         ? ` (local v${entry.localVersion ?? '?'}, remote v${entry.remoteVersion ?? '?'})`
         : ''
     lines.push(`${index + 1}. ${entry.path} — ${entry.reason ?? 'both changed'}${versions}, ${entry.createdAt}`)
-    if (entry.copyPath) lines.push(`   remote copy: ${entry.copyPath}`)
+    if (entry.copyPath) lines.push(`   Overleaf copy: ${entry.copyPath}`)
     lines.push(`   settle: overleaf_resolve path="${entry.path}" choice=keep_local|keep_remote|merge`)
   })
   if (conflicts.length > 10) lines.push(`… (+${conflicts.length - 10} more)`)
@@ -515,7 +534,7 @@ export function describeWatch(summary: WatchStatus): string {
   ]
   for (const session of summary.sessions) {
     lines.push(
-      `- ${session.projectName} → ${session.localRoot} · open docs ${session.openDocs}` +
+      `- ${session.projectName} → ${session.location} · open docs ${session.openDocs}` +
         (session.startedAt ? ` · since ${session.startedAt}` : '') +
         (session.lastError ? ` · last error: ${session.lastError}` : ''),
     )

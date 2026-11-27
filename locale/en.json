@@ -31,6 +31,12 @@
   "pickedPath": "Selected {path}",
   "validating": "Checking…",
   "useDefaultButton": "Use default",
+  "targetLabel": "Folder is on",
+  "targetLocal": "This machine",
+  "targetHost": "SSH host",
+  "remoteRootLabel": "Folder on the host",
+  "remoteRootHint": "The path is a folder on the selected SSH host; ~ is its home directory. Files travel over SSH, so the host never needs to reach Overleaf.",
+  "hostsUnavailable": "dsh-cloud-workspaces is not loaded, so only folders on this machine can be synced.",
   "linkButton": "Bind",
   "linking": "Binding…",
   "linkedFiles": "{count} remote files",
@@ -61,6 +67,7 @@
   "watchAutoStart": "Watch a document when it opens",
   "watchIdleLeaveDocMs": "Idle timeout before leaving a document (ms)",
   "watchMaxOpenDocs": "Maximum watched documents",
+  "watchPollMs": "Poll interval for SSH-host folders (ms)",
   "journalEnabled": "Enable the operation journal",
   "journalKeepDays": "Journal retention (days)",
   "debug": "Debug logging",
@@ -141,5 +148,6 @@
   "sbResolveMerge": "Merge",
   "sbResolveHint": "Resolving records a fresh baseline; Merge writes conflict markers into the file.",
   "sbResolved": "Resolved {count} conflict(s)",
-  "sbResolveNone": "No unresolved conflicts left"
+  "sbResolveNone": "No unresolved conflicts left",
+  "pendingUnavailable": "Could not count the changes in the remote folder: {error}"
 }

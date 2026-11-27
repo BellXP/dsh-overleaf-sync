@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   EVENTS_URL,
+  displayLocation,
   isMissingRoute,
   post,
   type ApiFailure,
@@ -342,12 +343,16 @@ export function OverleafSidebarPanel(props: PanelProps): ReactNode {
             </div>
           </div>
 
+          {status?.pending.error === undefined ? null : (
+            <Hint tone="error">{t('pendingUnavailable', { error: status.pending.error })}</Hint>
+          )}
+
           <div style={card}>
-            <span style={mono}>{pinned.localRoot}</span>
+            <span style={mono}>{displayLocation(pinned)}</span>
             <div style={row}>
               <Button
                 onClick={() => {
-                  void copyPath(pinned.localRoot)
+                  void copyPath(displayLocation(pinned))
                 }}
               >
                 {copied ? t('sbCopied') : t('sbCopyPath')}

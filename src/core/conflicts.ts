@@ -16,6 +16,9 @@
  * artifact directory is archived under `conflicts/resolved/<stamp>/` instead of
  * being deleted — "the overwritten version can always be recovered" is a hard
  * rule of the design, and an archive makes it true even after resolution.
+ *
+ * The artifacts always live in the plugin state directory on this machine; the
+ * main file and its visible copy live in the linked tree, wherever that is.
  */
 
 import fs from 'node:fs/promises'
@@ -25,6 +28,7 @@ import type { LinkRecord } from '../types.js'
 import { conflictsDir } from './paths.js'
 import { atomicWrite, normalizeEol, readTextIfExists, sha256 } from './fsUtil.js'
 import { sha256Bytes } from './files.js'
+import { localTree, type TreeIo } from './tree.js'
 
 /** How a conflict is settled; `merge` keeps both and only clears the record. */
 export type ConflictChoice = 'keep_local' | 'keep_remote' | 'merge'
@@ -34,10 +38,16 @@ export interface ConflictEntry {
   path: string
   /** how the file is compared: documents hash normalized text, files raw bytes */
   kind: 'doc' | 'file'
-  /** why the conflict was recorded, e.g. `remote-changed` */
+  /** why the conflict was recorded, e.g. `remote-changed` or `no-baseline` */
   reason?: string
   localVersion?: number
   remoteVersion?: number
+  /**
+   * Overleaf document/file id, when the sync recorded it. A conflict raised
+   * before any baseline existed has no other way to name the document, and
+   * `keep_local` needs it to push the local text.
+   */
+  docId?: string
   createdAt: string
   /** artifact directory (`conflicts/<stamp>`) holding .local/.remote/.meta.json */
   dir: string
@@ -79,6 +89,7 @@ interface ConflictMeta {
   remoteVersion?: number
   createdAt?: string
   kind?: 'doc' | 'file'
+  docId?: string
 }
 
 /** Recursively collect `*.meta.json` files below `dir`. */
@@ -142,6 +153,7 @@ export async function discoverConflicts(projectId: string): Promise<ConflictEntr
       ...(meta.reason !== undefined ? { reason: meta.reason } : {}),
       ...(meta.localVersion !== undefined ? { localVersion: meta.localVersion } : {}),
       ...(meta.remoteVersion !== undefined ? { remoteVersion: meta.remoteVersion } : {}),
+      ...(typeof meta.docId === 'string' && meta.docId !== '' ? { docId: meta.docId } : {}),
       createdAt: meta.createdAt ?? stamp,
       dir,
       copyPath: path.posix.join(parsed.dir, `${parsed.name}.remote-${stamp}${parsed.ext}`),
@@ -175,18 +187,6 @@ async function archiveDir(projectId: string, dir: string, dryRun: boolean): Prom
 }
 
 /**
- * Settle one conflict.
- *
- * - `keep_local`  → the main file keeps the local side (`.local`)
- * - `keep_remote` → the main file is overwritten with the remote side (`.remote`)
- * - `merge`       → the main file is left untouched; both sides stay on disk
- *                   (`<name>.remote-<stamp>.<ext>` is already next to it)
- *
- * The returned hashes describe the *new baseline*: `localHash` matches what is
- * on disk now, `remoteHash` matches the remote text this resolution was based
- * on, so a later push still notices if Overleaf moved on in the meantime.
- */
-/**
  * Whole-file merge with the familiar markers.
  *
  * Line-level diff/merge would need a three-way base we do not store, so a
@@ -200,13 +200,27 @@ export function mergeText(local: string, remote: string): string {
   return ['<<<<<<< local', left + '=======', right + '>>>>>>> remote', ''].join(nl)
 }
 
+/**
+ * Settle one conflict.
+ *
+ * - `keep_local`  → the main file keeps the local side (`.local`)
+ * - `keep_remote` → the main file is overwritten with the remote side (`.remote`)
+ * - `merge`       → the main file is left untouched; both sides stay on disk
+ *                   (`<name>.remote-<stamp>.<ext>` is already next to it)
+ *
+ * The returned hashes describe the *new baseline*: `localHash` matches what is
+ * on disk now, `remoteHash` matches the remote text this resolution was based
+ * on, so a later push still notices if Overleaf moved on in the meantime.
+ */
 export async function resolveConflict(options: {
   link: LinkRecord
   entry: ConflictEntry
   choice: ConflictChoice
   dryRun?: boolean
+  tree?: TreeIo
 }): Promise<ResolvedConflict> {
   const { link, entry, choice } = options
+  const tree = options.tree ?? localTree
   const dryRun = options.dryRun === true
 
   // `.meta.json` sits next to the payload, whose own name mirrors the rel path.
@@ -214,7 +228,7 @@ export async function resolveConflict(options: {
   const localFile = `${stem}.local`
   const remoteFile = `${stem}.remote`
 
-  const mainAbs = path.join(link.localRoot, ...entry.path.split('/'))
+  const mainAbs = tree.join(link.localRoot, ...entry.path.split('/'))
 
   let localHash: string
   let remoteHash: string
@@ -230,19 +244,15 @@ export async function resolveConflict(options: {
     const chosen = choice === 'keep_remote' ? remoteBytes : localBytes
     localHash = sha256Bytes(chosen)
     remoteHash = sha256Bytes(remoteBytes)
-    if (!dryRun) {
-      if (choice !== 'merge') {
-        const dir = path.dirname(mainAbs)
-        await fs.mkdir(dir, { recursive: true })
-        await fs.writeFile(mainAbs, chosen)
-      }
+    if (!dryRun && choice !== 'merge') {
+      await tree.writeBytes(mainAbs, chosen)
     }
   } else {
     const [localText, remoteText] = await Promise.all([
       readTextIfExists(localFile),
       readTextIfExists(remoteFile),
     ])
-    const fallbackLocal = choice === 'merge' ? await readTextIfExists(mainAbs) : undefined
+    const fallbackLocal = choice === 'merge' ? await tree.readText(mainAbs) : undefined
     const local = localText ?? fallbackLocal ?? ''
     const remote = remoteText ?? ''
     if (localText === undefined || remoteText === undefined) {
@@ -254,7 +264,7 @@ export async function resolveConflict(options: {
     const merged = choice === 'merge' ? mergeText(local, remote) : chosen
     localHash = sha256(normalizeEol(merged))
     remoteHash = sha256(normalizeEol(remote))
-    if (!dryRun) await atomicWrite(mainAbs, merged)
+    if (!dryRun) await tree.writeText(mainAbs, merged)
   }
 
   const archivedTo = await archiveDir(link.projectId, entry.dir, dryRun)
@@ -269,28 +279,71 @@ export async function resolveConflict(options: {
   }
 }
 
+/**
+ * Keep what a forced pull is about to overwrite.
+ *
+ * Nothing stays "open": the artifacts go straight into the archive
+ * (`conflicts/resolved/<stamp>/`), so the overwritten text is recoverable
+ * without showing up as a conflict to settle.
+ *
+ * @returns the archive directory
+ */
+export async function archiveOverwrite(options: {
+  link: LinkRecord
+  relPath: string
+  localText?: string
+  remoteText?: string
+  localBytes?: Uint8Array
+  remoteBytes?: Uint8Array
+  meta?: Record<string, unknown>
+}): Promise<string> {
+  const stamp = conflictStamp()
+  const dir = path.join(conflictsDir(options.link.projectId), 'resolved', stamp)
+  const base = path.join(dir, ...options.relPath.split('/'))
+  await fs.mkdir(path.dirname(base), { recursive: true })
+  const binary = options.localBytes !== undefined || options.remoteBytes !== undefined
+  if (binary) {
+    await fs.writeFile(`${base}.local`, options.localBytes ?? new Uint8Array(0))
+    await fs.writeFile(`${base}.remote`, options.remoteBytes ?? new Uint8Array(0))
+  } else {
+    await fs.writeFile(`${base}.local`, options.localText ?? '')
+    await fs.writeFile(`${base}.remote`, options.remoteText ?? '')
+  }
+  await atomicWrite(
+    `${base}.meta.json`,
+    JSON.stringify(
+      {
+        path: options.relPath,
+        kind: binary ? 'file' : 'doc',
+        reason: 'overwritten by a forced pull',
+        ...options.meta,
+        createdAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  )
+  return dir
+}
+
 /** Timestamp used both for the artifact directory and the visible copy name. */
 function conflictStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-')
 }
 
 async function findReusableCopy(
+  tree: TreeIo,
   dirAbs: string,
   relDir: string,
   stem: string,
   ext: string,
   compare: (text: string) => boolean,
 ): Promise<string | undefined> {
-  let names: string[]
-  try {
-    names = await fs.readdir(dirAbs)
-  } catch {
-    return undefined
-  }
+  const names = await tree.listDir(dirAbs)
   for (const name of names) {
     if (!name.startsWith(`${stem}.remote-`)) continue
     if (ext && !name.endsWith(ext)) continue
-    const text = await readTextIfExists(path.join(dirAbs, name))
+    const text = await tree.readText(tree.join(dirAbs, name))
     if (text !== undefined && compare(text)) return path.posix.join(relDir, name)
   }
   return undefined
@@ -311,8 +364,10 @@ export async function writeTextConflict(options: {
   localText: string
   remoteText: string
   meta?: Record<string, unknown>
+  tree?: TreeIo
 }): Promise<string> {
   const { link, relPath, localText, remoteText } = options
+  const tree = options.tree ?? localTree
   const meta = options.meta ?? {}
   const stamp = conflictStamp()
   const dir = path.join(conflictsDir(link.projectId), stamp)
@@ -327,18 +382,17 @@ export async function writeTextConflict(options: {
 
   const parsed = path.posix.parse(relPath)
   const visibleRel = path.posix.join(parsed.dir, `${parsed.name}.remote-${stamp}${parsed.ext}`)
-  const visibleAbs = path.join(link.localRoot, ...visibleRel.split('/'))
   const wanted = sha256(normalizeEol(remoteText))
   const reusable = await findReusableCopy(
-    path.dirname(visibleAbs),
+    tree,
+    tree.join(link.localRoot, ...parsed.dir.split('/')),
     parsed.dir,
     parsed.name,
     parsed.ext,
     (text) => sha256(normalizeEol(text)) === wanted,
   )
   if (reusable) return reusable
-  await fs.mkdir(path.dirname(visibleAbs), { recursive: true })
-  await atomicWrite(visibleAbs, remoteText)
+  await tree.writeText(tree.join(link.localRoot, ...visibleRel.split('/')), remoteText)
   return visibleRel
 }
 
@@ -349,8 +403,10 @@ export async function writeBinaryConflict(options: {
   localBytes: Uint8Array
   remoteBytes: Uint8Array
   meta?: Record<string, unknown>
+  tree?: TreeIo
 }): Promise<string> {
   const { link, relPath, localBytes, remoteBytes } = options
+  const tree = options.tree ?? localTree
   const meta = options.meta ?? {}
   const stamp = conflictStamp()
   const dir = path.join(conflictsDir(link.projectId), stamp)
@@ -365,8 +421,6 @@ export async function writeBinaryConflict(options: {
 
   const parsed = path.posix.parse(relPath)
   const visibleRel = path.posix.join(parsed.dir, `${parsed.name}.remote-${stamp}${parsed.ext}`)
-  const visibleAbs = path.join(link.localRoot, ...visibleRel.split('/'))
-  await fs.mkdir(path.dirname(visibleAbs), { recursive: true })
-  await fs.writeFile(visibleAbs, remoteBytes)
+  await tree.writeBytes(tree.join(link.localRoot, ...visibleRel.split('/')), remoteBytes)
   return visibleRel
 }

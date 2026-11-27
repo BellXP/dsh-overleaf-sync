@@ -58,6 +58,7 @@ test('registers one route per API method and disposes them on unload', () => {
   assert.deepEqual(paths, [
     '/overleaf/api/conflicts',
     '/overleaf/api/diff',
+    '/overleaf/api/hosts',
     '/overleaf/api/journal',
     '/overleaf/api/link',
     '/overleaf/api/login',
@@ -152,5 +153,5 @@ test('optional services are read through ctx.get, not the guarded property', () 
   }
 
   assert.doesNotThrow(() => registerOverleafApi(ctx, { service: fakeService(), config, cwd: process.cwd() }))
-  assert.equal(registered.length, 17)
+  assert.equal(registered.length, 18)
 })

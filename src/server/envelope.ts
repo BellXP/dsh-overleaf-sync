@@ -60,7 +60,10 @@ export function statusForCode(code: string): number {
     case 'E_LOCAL_DIR_CONFIRM_REQUIRED':
     case 'E_CONFIRM_REQUIRED':
     case 'E_CONFIG':
+    case 'E_HOST_UNAVAILABLE':
       return 400
+    case 'E_HOST_UNREACHABLE':
+      return 503
     default:
       return 500
   }

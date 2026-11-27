@@ -1,5 +1,6 @@
 import os from 'node:os'
 import path from 'node:path'
+import { posix } from 'node:path'
 
 /** `~/.dsh/overleaf-sync` — everything we persist lives here, never inside the project. */
 export function stateRoot(): string {
@@ -88,4 +89,50 @@ export function uniquePath(dir: string, exists: (candidate: string) => boolean):
     if (!exists(candidate)) return candidate
   }
   throw new Error(`cannot find a free directory name for ${dir}`)
+}
+
+/** {@link uniquePath} for a tree where "does it exist?" is a round trip. */
+export async function uniquePathAsync(dir: string, exists: (candidate: string) => Promise<boolean>): Promise<string> {
+  if (!(await exists(dir))) return dir
+  for (let i = 1; i < 1000; i += 1) {
+    const candidate = `${dir} (${i})`
+    if (!(await exists(candidate))) return candidate
+  }
+  throw new Error(`cannot find a free directory name for ${dir}`)
+}
+
+// ------------------------------------------------------------- SSH host links
+
+/** How messages name a linked folder: the path, or `host:path` when it lives on an SSH host. */
+export function describeLocation(host: string | undefined, localRoot: string): string {
+  return host ? `${host}:${localRoot}` : localRoot
+}
+
+/** `~` → `home`, `~/x` → `home/x`; anything else is returned as typed. */
+function expandHomeWith(input: string, home: string | undefined): string {
+  if (input === '~') return home ?? '/'
+  if (input.startsWith('~/') || input.startsWith('~\\')) return posix.join(home ?? '/', input.slice(2))
+  return input
+}
+
+/**
+ * Resolve a folder on an SSH host into an absolute POSIX path.
+ *
+ * `~` needs that host's `$HOME`; a relative path lands in it, because the
+ * session's working directory is not something this machine can see.
+ */
+export function resolveRemotePath(input: string, home: string | undefined): string {
+  return posix.normalize(posix.resolve(home ?? '/', expandHomeWith(input.trim(), home)))
+}
+
+/** {@link resolveLocalRoot} for an SSH host: POSIX arithmetic around the remote `$HOME`. */
+export function resolveRemoteLocalRoot(
+  pattern: string,
+  options: { project: string; home: string | undefined; now?: Date },
+): string {
+  const date = (options.now ?? new Date()).toISOString().slice(0, 10)
+  const expanded = expandHomeWith(pattern, options.home)
+    .replaceAll('{project}', filesystemSafeName(options.project))
+    .replaceAll('{date}', date)
+  return resolveRemotePath(expanded, options.home)
 }

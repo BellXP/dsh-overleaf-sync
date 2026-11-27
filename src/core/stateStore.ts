@@ -34,11 +34,12 @@ export function compareBaseline(
 }
 
 /** Fresh, valid state for a project that has never been synced. */
-export function emptyProjectState(projectId: string, localRoot: string): ProjectState {
+export function emptyProjectState(projectId: string, localRoot: string, host?: string): ProjectState {
   return {
     schemaVersion: 1,
     projectId,
     localRoot,
+    ...(host !== undefined ? { host } : {}),
     updatedAt: new Date().toISOString(),
     files: {},
   }
@@ -70,6 +71,7 @@ export async function readProjectState(projectId: string): Promise<ProjectState 
       schemaVersion: 1,
       projectId: typeof parsed.projectId === 'string' ? parsed.projectId : projectId,
       localRoot: typeof parsed.localRoot === 'string' ? parsed.localRoot : '',
+      ...(typeof parsed.host === 'string' && parsed.host !== '' ? { host: parsed.host } : {}),
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date(0).toISOString(),
       files,
     }
@@ -91,19 +93,23 @@ export async function writeProjectState(state: ProjectState): Promise<void> {
 /**
  * Convenience wrapper around `state.json` for one project.
  *
- * Mutations are in-memory; call `save()` to persist. `localRoot` is refreshed
- * when the project was linked/moved to a different folder so the stored record
- * follows the user instead of pointing at the old location.
+ * Mutations are in-memory; call `save()` to persist. `localRoot` and `host`
+ * are refreshed when the project was linked/moved to a different folder so the
+ * stored record follows the user instead of pointing at the old location.
  */
 export class StateStore {
   private constructor(public readonly state: ProjectState) {}
 
-  static async load(projectId: string, localRoot: string): Promise<StateStore> {
+  static async load(projectId: string, localRoot: string, host?: string): Promise<StateStore> {
     const loaded = await readProjectState(projectId)
     if (loaded === undefined) {
-      return new StateStore(emptyProjectState(projectId, localRoot))
+      return new StateStore(emptyProjectState(projectId, localRoot, host))
     }
     if (loaded.localRoot !== localRoot) loaded.localRoot = localRoot
+    if (loaded.host !== host) {
+      if (host === undefined) delete loaded.host
+      else loaded.host = host
+    }
     return new StateStore(loaded)
   }
 

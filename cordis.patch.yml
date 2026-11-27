@@ -20,6 +20,7 @@
           autoStart: false
           idleLeaveDocMs: 60000
           maxOpenDocs: 20
+          pollMs: 3000
         git:
           autoInit: true
           autoCommit: false

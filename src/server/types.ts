@@ -7,21 +7,31 @@
 
 import type { ConflictStrategy } from '../types.js'
 
+/** Where a linked folder is: `host` is set when it is a directory on an SSH host. */
+export interface LocationView {
+  localRoot: string
+  host?: string
+}
+
 export interface StatusSummary {
   baseUrl: string
   authenticated: boolean
   credential?: { hint?: string; savedAt?: string }
-  current?: {
+  current?: LocationView & {
     projectId: string
     projectName: string
-    localRoot: string
     files: number
     remoteVersion?: number
     lastPullAt?: string
     git?: { root: string; mode: 'own' | 'parent' | 'none'; head?: string }
   }
-  projects: Array<{ projectId: string; projectName: string; localRoot: string; files: number; linkedAt: string }>
-  pending: { localChanges: number; conflicts: number }
+  projects: Array<LocationView & { projectId: string; projectName: string; files: number; linkedAt: string }>
+  pending: {
+    localChanges: number
+    conflicts: number
+    /** Why `localChanges` could not be computed (typically: the SSH host is unreachable). */
+    error?: string
+  }
   /** One line for a toast/badge; always human-readable, never a code. */
   text: string
 }
@@ -43,7 +53,9 @@ export interface WatchView {
   running: boolean
   projectId?: string
   projectName?: string
+  /** Set only while a session runs. */
   localRoot?: string
+  host?: string
   openDocs: number
   startedAt?: string
   lastEventAt?: string
@@ -61,6 +73,13 @@ export interface WatchView {
 export interface ResolveView {
   choice: string
   resolved: Array<{ path: string; kind: string; remoteVersion: number; archivedTo?: string }>
+}
+
+/** `POST /overleaf/api/hosts` — SSH hosts a link can point at. */
+export interface HostsView {
+  /** `false` when no `ssh` service is loaded (dsh-cloud-workspaces not installed). */
+  available: boolean
+  hosts: Array<{ alias: string; host?: string; user?: string; description?: string }>
 }
 
 export type FieldType = 'string' | 'boolean' | 'number' | 'enum'

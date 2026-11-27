@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 
 import type {
   ApiResult,
+  HostsView,
   LinkRecord,
   PathValidation,
   PickDirectoryResult,
@@ -13,6 +14,7 @@ import type {
   SettingsField,
   StatusSummary,
 } from './api'
+import { displayLocation } from './api'
 import { FieldControl, FieldRow, Hint, SectionCard, SwitchRow, type DraftValue, type Translate } from './fields'
 
 /**
@@ -54,8 +56,8 @@ export function SyncBlock(props: {
       <div style={summaryGrid}>
         <span style={summaryKey}>{t('projectTitle')}</span>
         <span>{current.projectName}</span>
-        <span style={summaryKey}>{t('localRootLabel')}</span>
-        <span style={{ wordBreak: 'break-all' }}>{current.localRoot}</span>
+        <span style={summaryKey}>{t(current.host === undefined ? 'localRootLabel' : 'remoteRootLabel')}</span>
+        <span style={{ wordBreak: 'break-all' }}>{displayLocation(current)}</span>
         <span style={summaryKey}>{t('syncFilesLabel')}</span>
         <span>{String(current.files)}</span>
         {current.git === undefined ? null : (
@@ -178,6 +180,7 @@ const ADVANCED_KEYS = [
   'watch.autoStart',
   'watch.idleLeaveDocMs',
   'watch.maxOpenDocs',
+  'watch.pollMs',
   'journal.enabled',
   'journal.keepDays',
   'debug',
@@ -381,24 +384,28 @@ export function AccountBlock(props: {
   )
 }
 
-/** Section ②: project picker, local folder validation, binding. */
+/** Section ②: project picker, folder validation (this machine or an SSH host), binding. */
 export function ProjectBlock(props: {
   t: Translate
   status: StatusSummary | null
   projects: ProjectListEntry[]
   pattern: string
+  /** SSH hosts a link can point at; `null` while unknown, `available: false` without the plugin. */
+  hosts: HostsView | null
   disabled: boolean
   busy: boolean
   onRefresh: () => void
-  onValidatePath: (payload: { path: string; projectId?: string }) => Promise<ApiResult<PathValidation>>
+  onValidatePath: (payload: { path: string; projectId?: string; host?: string }) => Promise<ApiResult<PathValidation>>
   /** Opens the host's folder chooser; `kind` says whether that is possible at all. */
   onPickDirectory: (options?: { probe?: boolean }) => Promise<ApiResult<PickDirectoryResult>>
-  onLink: (payload: { projectId: string; localRoot?: string; force?: boolean }) => Promise<ApiResult<LinkRecord>>
+  onLink: (payload: { projectId: string; localRoot?: string; host?: string; force?: boolean }) => Promise<ApiResult<LinkRecord>>
 }): ReactNode {
   const { t } = props
   const current = props.status?.current
   const [projectId, setProjectId] = useState('')
   const [root, setRoot] = useState('')
+  /** SSH host alias the link should point at; '' = a folder on this machine. */
+  const [host, setHost] = useState<string>(current?.host ?? '')
   const [validation, setValidation] = useState<PathValidation | null>(null)
   const [force, setForce] = useState<{ path: string; message: string } | null>(null)
   /** Set once the host answers that it has no OS chooser: show the manual fallback instead. */
@@ -426,6 +433,9 @@ export function ProjectBlock(props: {
   const selected = props.projects.find((entry) => entry.id === selectedId)
   const projectName = selected?.name ?? current?.projectName ?? ''
   const preview = projectName.length > 0 ? expandPattern(props.pattern, projectName) : props.pattern
+  // The same pattern reads as a path on the host (`~` is its home directory there).
+  const remote = host !== ''
+  const hostOptions = props.hosts?.available === true ? props.hosts.hosts : []
 
   const canLink = selectedId.length > 0 && !props.disabled && !props.busy
 
@@ -435,6 +445,7 @@ export function ProjectBlock(props: {
     const result = await props.onValidatePath({
       path: target.length > 0 ? target : preview,
       ...(selectedId.length > 0 ? { projectId: selectedId } : {}),
+      ...(remote ? { host } : {}),
     })
     if (result.ok) {
       setValidation(result.value)
@@ -469,6 +480,8 @@ export function ProjectBlock(props: {
     const result = await props.onLink({
       projectId: selectedId,
       ...(root.trim().length > 0 ? { localRoot: root.trim() } : {}),
+      // Always named, so switching a remote link back to this machine is one step.
+      host,
       ...(forceLink ? { force: true } : {}),
     })
     if (result.ok) {
@@ -516,13 +529,45 @@ export function ProjectBlock(props: {
           </select>
         }
       />
+      {props.hosts === null ? null : (
+        <FieldRow
+          label={t('targetLabel')}
+          hint={props.hosts.available ? undefined : t('hostsUnavailable')}
+          control={
+            props.hosts.available ? (
+              <select
+                aria-label={t('targetLabel')}
+                disabled={props.disabled}
+                value={host}
+                style={{ padding: '6px 8px', borderRadius: 6, fontSize: 13, minWidth: 240 }}
+                onChange={(event) => {
+                  setHost(event.currentTarget.value)
+                  setRoot('')
+                  setValidation(null)
+                  setForce(null)
+                }}
+              >
+                <option value="">{t('targetLocal')}</option>
+                {hostOptions.map((entry) => (
+                  <option key={entry.alias} value={entry.alias}>
+                    {entry.alias}
+                    {entry.description === undefined || entry.description === '' ? '' : ` — ${entry.description}`}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span style={{ opacity: 0.7 }}>{t('targetLocal')}</span>
+            )
+          }
+        />
+      )}
       <FieldRow
-        label={t('localRootLabel')}
-        hint={t('localRootHint')}
+        label={t(remote ? 'remoteRootLabel' : 'localRootLabel')}
+        hint={t(remote ? 'remoteRootHint' : 'localRootHint')}
         control={
           <div style={inputRow}>
             <Input
-              aria-label={t('localRootLabel')}
+              aria-label={t(remote ? 'remoteRootLabel' : 'localRootLabel')}
               spellCheck={false}
               disabled={props.disabled}
               placeholder={preview}
@@ -534,7 +579,7 @@ export function ProjectBlock(props: {
                 setForce(null)
               }}
             />
-            {pickerBlocked !== null && pickerBlocked.length > 0 ? (
+            {remote || (pickerBlocked !== null && pickerBlocked.length > 0) ? (
               <Button variant="ghost" size="sm" disabled={props.disabled || props.busy} onClick={() => void doValidate()}>
                 {t('validateButton')}
               </Button>
@@ -563,7 +608,7 @@ export function ProjectBlock(props: {
           </div>
         }
       />
-      {pickerBlocked === null ? null : <Hint tone="warn">{pickerBlocked}</Hint>}
+      {remote || pickerBlocked === null ? null : <Hint tone="warn">{pickerBlocked}</Hint>}
       {validation === null ? null : validation.ok ? (
         <Hint tone="ok">{t('pathOk', { path: validation.resolved })}</Hint>
       ) : (
@@ -602,7 +647,7 @@ export function ProjectBlock(props: {
             {t('linkedFiles', { count: current.files })} ·{' '}
             {current.lastPullAt === undefined ? t('neverPulled') : t('lastPullAt', { time: formatTime(current.lastPullAt) })}
           </div>
-          <div>{current.localRoot}</div>
+          <div>{displayLocation(current)}</div>
         </div>
       )}
     </SectionCard>

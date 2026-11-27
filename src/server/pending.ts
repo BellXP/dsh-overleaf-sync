@@ -11,13 +11,18 @@
  * 2. **Only baseline paths can be pushed.** Untracked local files (a `.git`
  *    artifact, an editor swap file, a build output) are not something `push`
  *    would ever send, so counting them makes the badge cry wolf.
+ *
+ * On an SSH host every read is a round trip and the panel asks on every
+ * refresh, so the first pass asks the host for its own `sha256sum` of all the
+ * files at once; only the files that answer differently from the baseline are
+ * downloaded for the exact comparison.
  */
-import fs from 'node:fs/promises'
-import path from 'node:path'
-
 import { normalizeEol, sha256 } from '../core/fsUtil.js'
 import { sha256Bytes } from '../core/files.js'
+import { localTree, type TreeIo } from '../core/tree.js'
 import type { FileState, ProjectState } from '../types.js'
+
+type BaselineEntries = Array<[rel: string, baseline: FileState]>
 
 /**
  * Count baseline entries whose local file changed or disappeared.
@@ -29,22 +34,53 @@ export async function countPendingLocalChanges(
   state: Pick<ProjectState, 'files'>,
   localRoot: string,
   shouldIgnore?: (relPath: string) => boolean,
+  tree: TreeIo = localTree,
 ): Promise<number> {
+  const entries: BaselineEntries = Object.entries(state.files).filter(([rel]) => shouldIgnore?.(rel) !== true)
+  if (tree.kind === 'ssh') return countPendingViaHashes(entries, localRoot, tree)
+
   let changed = 0
-  for (const [rel, baseline] of Object.entries(state.files)) {
-    if (shouldIgnore?.(rel) === true) continue
-    const absolute = path.join(localRoot, rel)
-    let bytes: Buffer
-    try {
-      bytes = await fs.readFile(absolute)
-    } catch {
-      changed += 1
-      continue
-    }
-    if (isUnchanged(baseline, bytes)) continue
-    changed += 1
+  for (const [rel, baseline] of entries) {
+    if (!(await isUnchangedOnDisk(tree, localRoot, rel, baseline))) changed += 1
   }
   return changed
+}
+
+/** First pass: the host's own checksums. Second pass: exact, for the files that disagree. */
+async function countPendingViaHashes(entries: BaselineEntries, localRoot: string, tree: TreeIo): Promise<number> {
+  const hashes = await tree.hashFiles(
+    localRoot,
+    entries.map(([rel]) => rel),
+  )
+  let changed = 0
+  const uncertain: BaselineEntries = []
+  for (const entry of entries) {
+    const hex = hashes.get(entry[0])
+    // A raw checksum equal to the baseline proves nothing changed; the reverse
+    // is not a proof (CRLF, a missed file), so those are re-read.
+    if (hex !== undefined && `sha256:${hex}` === entry[1].localHash) continue
+    uncertain.push(entry)
+  }
+  for (const [rel, baseline] of uncertain) {
+    if (!(await isUnchangedOnDisk(tree, localRoot, rel, baseline))) changed += 1
+  }
+  return changed
+}
+
+async function isUnchangedOnDisk(
+  tree: TreeIo,
+  localRoot: string,
+  rel: string,
+  baseline: FileState,
+): Promise<boolean> {
+  let bytes: Buffer | undefined
+  try {
+    bytes = await tree.readBytes(tree.resolve(localRoot, rel))
+  } catch {
+    return false
+  }
+  if (bytes === undefined) return false
+  return isUnchanged(baseline, bytes)
 }
 
 /**
