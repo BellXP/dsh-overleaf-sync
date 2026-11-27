@@ -154,9 +154,12 @@ describe('proxyRouteFor / proxyJoinHint / createProxyAgent', () => {
     withEnv({}, () => assert.equal(proxyAgentFor(OVERLEAF), undefined))
   })
 
-  it('the agent is not a pooling one: a transport hands each request its own socket', () => {
+  it('the agent pools exactly one keep-alive socket: handshake and upgrade share one connection', () => {
     const agent = createProxyAgent('http://corp.test:8080', 'https:')
-    assert.equal(agent.keepAlive, false)
+    // A proxy gives every new connection a new egress address, and a load balancer pinning by
+    // client address then splits the handshake and the websocket upgrade across backends.
+    assert.equal(agent.keepAlive, true)
+    assert.equal(agent.maxSockets, 1)
     agent.destroy()
   })
 })

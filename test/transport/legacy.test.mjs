@@ -119,6 +119,8 @@ async function startFakeServer(options = {}) {
     sockets: new Set(),
     joinPayload: undefined,
     rejections: 0,
+    /** Upgrades answered with an HTTP error so far (the load-balancer face of a misrouted sid). */
+    httpRefusals: 0,
   }
   const handshakeBody = options.handshake ?? 'FAKE-SID-1:60:60:websocket,xhr-polling'
   const server = http.createServer((req, res) => {
@@ -183,6 +185,21 @@ async function startFakeServer(options = {}) {
 
   server.on('upgrade', (req, socket, head) => {
     state.requests.push({ url: req.url, headers: req.headers, upgraded: true })
+    // What the Google front in front of overleaf.com does when the upgrade lands on a
+    // backend that never saw the handshake: an HTTP 502 page, no websocket at all.
+    // `upgradeStatus` answers every upgrade with that status instead (final-error tests).
+    if (state.httpRefusals < (options.httpRefusedUpgrades ?? 0) || options.upgradeStatus !== undefined) {
+      state.httpRefusals += 1
+      const status = options.upgradeStatus ?? 502
+      socket.write(
+        `HTTP/1.1 ${status} X\r\n` +
+          'Content-Type: text/html; charset=UTF-8\r\n' +
+          'Connection: close\r\n\r\n' +
+          `<html><head><title>${status} Server Error</title></head><body text=#000000 bgcolor=#ffffff><h1>Server Error</h1></body></html>\r\n`,
+      )
+      socket.destroy()
+      return
+    }
     const key = String(req.headers['sec-websocket-key'] ?? '')
     const accept =
       options.acceptOverride ??
@@ -589,6 +606,51 @@ describe('LegacyOverleafSocket', () => {
     } finally {
       socket.close()
     }
+  })
+
+  test('retries when the load balancer answers the upgrade with HTTP 502 instead of 7:::1+0', async () => {
+    // www.overleaf.com, 2026-11-27: identical upgrade requests alternate between 101 and 502.
+    const fake = await withServer({ httpRefusedUpgrades: 5, joinResult: { publicId: 'after-502s' } })
+    const socket = await LegacyOverleafSocket.connect({
+      baseUrl: fake.baseUrl,
+      projectId: 'proj-502',
+      ...CREDENTIALS,
+    })
+    try {
+      assert.deepEqual(socket.payload, { publicId: 'after-502s' })
+      const upgrades = fake.state.requests.filter((request) => request.upgraded)
+      assert.equal(upgrades.length, 6, 'five HTTP refusals, then the accepted upgrade')
+      assert.ok(fake.state.requests.filter((request) => !request.upgraded).length >= 2, 'the sid is renewed along the way')
+    } finally {
+      socket.close()
+    }
+  })
+
+  test('an upgrade that is always answered with 502 fails with the answer in the message', async () => {
+    const fake = await withServer({ httpRefusedUpgrades: 1_000 })
+    await assert.rejects(
+      LegacyOverleafSocket.connect({
+        baseUrl: fake.baseUrl,
+        projectId: 'proj-502-forever',
+        ...CREDENTIALS,
+        timeoutMs: 700,
+      }),
+      (error) =>
+        error.code === 'E_TRANSPORT' &&
+        /HTTP 502/.test(error.message) &&
+        /502 Server Error/.test(error.message) &&
+        /NO_PROXY|proxy/.test(error.hint ?? ''),
+    )
+    assert.ok(fake.state.httpRefusals >= 2, 'it retried before giving up')
+  })
+
+  test('a 404 on the upgrade is final: no retry', async () => {
+    const fake = await withServer({ httpRefusedUpgrades: 0, upgradeStatus: 404 })
+    await assert.rejects(
+      LegacyOverleafSocket.connect({ baseUrl: fake.baseUrl, projectId: 'proj-404', ...CREDENTIALS, timeoutMs: 3000 }),
+      (error) => error.code === 'E_TRANSPORT' && /HTTP 404/.test(error.message),
+    )
+    assert.equal(fake.state.requests.filter((request) => request.upgraded).length, 1)
   })
 
   test('retries a refused upgrade with the same sid instead of giving up', async () => {

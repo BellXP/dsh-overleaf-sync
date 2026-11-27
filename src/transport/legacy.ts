@@ -529,7 +529,21 @@ function requestOptions(
   }
 }
 
-function handshakeFailure(status: number, location?: string): OverleafSyncError {
+/** Who answered a failed handshake: the proxy chain and server headers, and the start of the body. */
+function describeHttpResponse(response: HttpResponse | undefined): string {
+  if (response === undefined) return ''
+  const parts: string[] = []
+  for (const name of ['via', 'server', 'content-type']) {
+    const value = response.headers[name]
+    const text = Array.isArray(value) ? value.join(', ') : value
+    if (typeof text === 'string' && text !== '') parts.push(`${name}: ${text}`)
+  }
+  const body = response.body.replace(/\s+/g, ' ').trim()
+  if (body !== '') parts.push(`body: ${body.length > 160 ? body.slice(0, 160) + '…' : body}`)
+  return parts.length === 0 ? '' : ` (${parts.join('; ')})`
+}
+
+function handshakeFailure(status: number, location?: string, response?: HttpResponse): OverleafSyncError {
   const auth = authErrorFor(status)
   if (auth) return auth
   if (status >= 300 && status < 400) {
@@ -546,9 +560,16 @@ function handshakeFailure(status: number, location?: string): OverleafSyncError 
       'this server does not expose /socket.io/1/; check the baseUrl (including any sub-path) and that the instance really runs Socket.IO 0.9',
     )
   }
+  if (status === 502 || status === 503 || status === 504) {
+    return new OverleafSyncError(
+      'E_TRANSPORT',
+      `socket.io handshake returned HTTP ${status}${describeHttpResponse(response)}`,
+      'an intermediary answered, not Overleaf: an outbound proxy in between cannot reach the server (or refuses the request) — add the Overleaf host to NO_PROXY, or let the proxy pass it',
+    )
+  }
   return new OverleafSyncError(
     'E_TRANSPORT',
-    `socket.io handshake returned HTTP ${status}`,
+    `socket.io handshake returned HTTP ${status}${describeHttpResponse(response)}`,
     'check the self-hosted Overleaf server and retry',
   )
 }
@@ -666,6 +687,13 @@ const AUTO_PUSH_GRACE_MS = 250
 const UPGRADE_ATTEMPTS_PER_SID = 4
 const UPGRADE_RETRY_DELAY_MS = 75
 const MIN_RETRY_BUDGET_MS = 250
+/**
+ * The same misrouting has a second face: in front of overleaf.com, a Google load balancer
+ * answers the upgrade with HTTP 502/503/504 instead of letting the fork send `7:::1+0`.
+ * Observed on www.overleaf.com on 2026-11-27: identical upgrade requests alternate between
+ * 101 and 502. Retry those like a refusal; anything else (401, 404, redirect) is final.
+ */
+const RETRYABLE_UPGRADE_STATUS = new Set([502, 503, 504])
 
 /** `joinProjectResponse` carries the project as its single argument. */
 function firstPayload(args: unknown[]): unknown {
@@ -925,7 +953,12 @@ export class LegacyOverleafSocket {
 
   async #open(): Promise<void> {
     const startedAt = Date.now()
-    const remaining = (): number => Math.max(1, this.#timeoutMs - (Date.now() - startedAt))
+    let misrouted = false
+    // A misrouted upgrade is not the server being down: the retry budget doubles (capped at
+    // 40 s, inside the transport factory's 45 s), while a server that never answers the
+    // handshake still fails at the plain budget.
+    const budgetMs = (): number => Math.min(40_000, this.#timeoutMs * (misrouted ? 2 : 1))
+    const remaining = (): number => Math.max(1, budgetMs() - (Date.now() - startedAt))
     const signal = this.#signal
     if (signal?.aborted) throw cancelledError('legacy socket connect')
     const onAbort = (): void => this.#failAll(cancelledError('legacy socket connect'))
@@ -940,6 +973,7 @@ export class LegacyOverleafSocket {
       for (let attempt = 1; ; attempt += 1) {
         const rejection = await this.#attemptConnect(remaining())
         if (rejection === undefined) break
+        misrouted = true
         this.#debug(`upgrade refused with ${clip(rejection, 60)}; retrying (attempt ${attempt})`)
         this.#resetTransport()
         const budget = remaining()
@@ -966,7 +1000,9 @@ export class LegacyOverleafSocket {
    * a backend that never saw our handshake, so the caller can retry the sid.
    */
   async #attemptConnect(budgetMs: number): Promise<string | undefined> {
-    const { socket, head } = await this.#upgrade(this.#sid, budgetMs)
+    const upgraded = await this.#upgrade(this.#sid, budgetMs)
+    if ('refused' in upgraded) return upgraded.refused
+    const { socket, head } = upgraded
     this.#attach(socket)
     if (head.length > 0) this.#onBytes(head)
     socket.resume()
@@ -1097,12 +1133,12 @@ export class LegacyOverleafSocket {
     if (response.statusCode !== 200) {
       const location =
         typeof response.headers.location === 'string' ? response.headers.location : undefined
-      throw handshakeFailure(response.statusCode, location)
+      throw handshakeFailure(response.statusCode, location, response)
     }
     return parseHandshakeResponse(response.body)
   }
 
-  #upgrade(sid: string, budgetMs: number): Promise<{ socket: Duplex; head: Buffer }> {
+  #upgrade(sid: string, budgetMs: number): Promise<{ socket: Duplex; head: Buffer } | { refused: string }> {
     const url = new URL(`${this.#prefix}/socket.io/1/websocket/${encodeURIComponent(sid)}`, this.#origin)
     const secWebSocketKey = randomBytes(16).toString('base64')
     const expectedAccept = acceptKeyFor(secWebSocketKey)
@@ -1116,7 +1152,7 @@ export class LegacyOverleafSocket {
     }
     const label = 'websocket upgrade'
     this.#debug(`GET ${url.pathname} (upgrade)`)
-    return new Promise<{ socket: Duplex; head: Buffer }>((resolve, reject) => {
+    return new Promise<{ socket: Duplex; head: Buffer } | { refused: string }>((resolve, reject) => {
       let settled = false
       let timer: NodeJS.Timeout | undefined
       let request: ClientRequest | undefined
@@ -1148,6 +1184,7 @@ export class LegacyOverleafSocket {
       }
       request.on('error', (error) => fail(networkFailure(error, label)))
       request.on('upgrade', (response, socket, head) => {
+        this.#debug(`upgrade answered on a ${request.reusedSocket ? 'reused' : 'new'} socket`)
         const headerValue = response.headers['sec-websocket-accept']
         const accept = Array.isArray(headerValue) ? headerValue[0] : headerValue
         if (response.statusCode !== 101 || accept !== expectedAccept) {
@@ -1172,10 +1209,30 @@ export class LegacyOverleafSocket {
         finish(() => resolve({ socket, head }))
       })
       request.on('response', (response) => {
-        response.resume()
-        const location =
-          typeof response.headers.location === 'string' ? response.headers.location : undefined
-        fail(handshakeFailure(response.statusCode ?? 0, location))
+        // The server (or an intermediary) answered instead of upgrading: keep what it said,
+        // so a 502 from an outbound proxy is distinguishable from an Overleaf error.
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer) => chunks.push(chunk))
+        const describe = (): HttpResponse => ({
+          statusCode: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        })
+        response.on('end', () => {
+          const status = response.statusCode ?? 0
+          const location =
+            typeof response.headers.location === 'string' ? response.headers.location : undefined
+          const failure = handshakeFailure(status, location, describe())
+          if (RETRYABLE_UPGRADE_STATUS.has(status)) {
+            // Misrouted by the load balancer (see RETRYABLE_UPGRADE_STATUS): let the caller
+            // retry like a `7:::1+0` refusal, and keep the failure for the case the budget runs out.
+            this.#lastRejection = failure
+            finish(() => resolve({ refused: `HTTP ${status}` }))
+            return
+          }
+          fail(failure)
+        })
+        response.on('error', () => fail(handshakeFailure(response.statusCode ?? 0, undefined, describe())))
       })
       request.end()
     })

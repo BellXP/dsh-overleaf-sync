@@ -131,13 +131,22 @@ type ProxyAgentOptions = HttpAgentOptions & HttpsAgentOptions & { proxyEnv?: Rec
 
 /**
  * An agent that routes every request through `proxy` — the http or https flavour to match the
- * target, as the request modules expect. Sockets are not pooled: the legacy transport hands each
- * request its own socket, and an upgrade must not inherit a pooled connection. The bypass list is
- * emptied on purpose: the route was already decided for the one URL this agent serves.
+ * target, as the request modules expect. The bypass list is emptied on purpose: the route was
+ * already decided for the one URL this agent serves.
+ *
+ * Sockets are kept alive and limited to one, on purpose. An outbound proxy gives each new TCP
+ * connection whatever egress address it pleases, and a load balancer that pins sessions by client
+ * address — Overleaf's does — then routes the handshake and the websocket upgrade (two requests,
+ * two connections) to different backends: the upgrade is refused (`7:::1+0`, or HTTP 502 from the
+ * front). Reusing the handshake's tunnel for the upgrade keeps both on one connection, so they
+ * reach the same backend. One agent serves one transport, so one socket serialises nothing that
+ * was not sequential already.
  */
 export function createProxyAgent(proxy: string, protocol: 'http:' | 'https:'): HttpAgent {
   const options: ProxyAgentOptions = {
-    keepAlive: false,
+    keepAlive: true,
+    keepAliveMsecs: 1000,
+    maxSockets: 1,
     proxyEnv: { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, NO_PROXY: '' },
   }
   return protocol === 'http:' ? new HttpAgent(options) : new HttpsAgent(options)
