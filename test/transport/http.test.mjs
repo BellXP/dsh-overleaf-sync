@@ -111,14 +111,14 @@ describe('OverleafHttp.listProjects', () => {
     })
   })
 
-  it('maps connection failures to E_TRANSPORT', async () => {
+  it('maps connection failures to E_TRANSPORT and names the cause code', async () => {
     const server = http.createServer()
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address()
     await new Promise((resolve) => server.close(resolve))
 
     const client = new OverleafHttp(makeCredential(`http://127.0.0.1:${port}`))
-    await assert.rejects(client.listProjects(), isOverleafError('E_TRANSPORT'))
+    await assert.rejects(client.listProjects(), (error) => isOverleafError('E_TRANSPORT')(error) && /\(ECONNREFUSED\)/.test(error.message))
   })
 
   it('maps invalid JSON to E_TRANSPORT', async () => {
@@ -154,6 +154,88 @@ describe('OverleafHttp.listProjects', () => {
       controller.abort()
       await assert.rejects(client.listProjects(controller.signal), isOverleafError('E_TRANSPORT'))
     })
+  })
+})
+
+/** What Node's `fetch` rejects with when the TCP/TLS layer fails: a bare TypeError, the reason on `cause`. */
+function fetchFailure(cause) {
+  return Object.assign(new TypeError('fetch failed'), cause === undefined ? {} : { cause })
+}
+
+async function withFetchRejecting(error, run) {
+  const real = globalThis.fetch
+  globalThis.fetch = () => Promise.reject(error)
+  try {
+    return await run()
+  } finally {
+    globalThis.fetch = real
+  }
+}
+
+async function listProjectsFailure(error) {
+  let caught
+  await withFetchRejecting(error, async () => {
+    try {
+      await new OverleafHttp(makeCredential('https://www.overleaf.com')).listProjects()
+    } catch (e) {
+      caught = e
+    }
+  })
+  assert.ok(caught instanceof OverleafSyncError, 'expected an OverleafSyncError')
+  return caught
+}
+
+describe('OverleafHttp transport failures name the cause', () => {
+  it('an untrusted certificate chain points at the certificate store and a restart', async () => {
+    const error = await listProjectsFailure(
+      fetchFailure(Object.assign(new Error('self-signed certificate in certificate chain'), { code: 'SELF_SIGNED_CERT_IN_CHAIN' })),
+    )
+    assert.equal(error.code, 'E_TRANSPORT')
+    assert.equal(error.message, 'GET user/projects failed: fetch failed (SELF_SIGNED_CERT_IN_CHAIN)')
+    assert.match(error.hint ?? '', /NODE_USE_SYSTEM_CA=1/)
+    assert.match(error.hint ?? '', /NODE_EXTRA_CA_CERTS/)
+    assert.match(error.hint ?? '', /restart/)
+  })
+
+  it('the other certificate codes get the same next step', async () => {
+    for (const code of ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED']) {
+      const error = await listProjectsFailure(fetchFailure(Object.assign(new Error('bad cert'), { code })))
+      assert.match(error.message, new RegExp(`\\(${code}\\)`))
+      assert.match(error.hint ?? '', /NODE_USE_SYSTEM_CA=1/)
+    }
+  })
+
+  it('a connection that never completed points at the outbound proxy', async () => {
+    for (const code of ['UND_ERR_CONNECT_TIMEOUT', 'ECONNREFUSED', 'ENETUNREACH']) {
+      const error = await listProjectsFailure(fetchFailure(Object.assign(new Error('no route'), { code })))
+      assert.match(error.message, new RegExp(`\\(${code}\\)`))
+      assert.match(error.hint ?? '', /HTTPS_PROXY/)
+      assert.doesNotMatch(error.hint ?? '', /NODE_USE_SYSTEM_CA/)
+    }
+  })
+
+  it('a host name that did not resolve says so', async () => {
+    const error = await listProjectsFailure(fetchFailure(Object.assign(new Error('getaddrinfo ENOTFOUND www.overleaf.com'), { code: 'ENOTFOUND' })))
+    assert.match(error.message, /\(ENOTFOUND\)/)
+    assert.match(error.hint ?? '', /did not resolve/)
+  })
+
+  it('an unknown cause code is still named, with the generic hint', async () => {
+    const error = await listProjectsFailure(fetchFailure(Object.assign(new Error('protocol error'), { code: 'EPROTO' })))
+    assert.equal(error.message, 'GET user/projects failed: fetch failed (EPROTO)')
+    assert.match(error.hint ?? '', /baseUrl, network connectivity and proxy settings/)
+  })
+
+  it('a cause without a code quotes its message', async () => {
+    const error = await listProjectsFailure(fetchFailure(new Error('socket hang up')))
+    assert.equal(error.message, 'GET user/projects failed: fetch failed (socket hang up)')
+    assert.match(error.hint ?? '', /baseUrl, network connectivity and proxy settings/)
+  })
+
+  it('a failure without a cause keeps the old message and hint', async () => {
+    const error = await listProjectsFailure(fetchFailure())
+    assert.equal(error.message, 'GET user/projects failed: fetch failed')
+    assert.match(error.hint ?? '', /baseUrl, network connectivity and proxy settings/)
   })
 })
 

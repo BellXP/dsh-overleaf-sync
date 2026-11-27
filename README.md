@@ -91,6 +91,16 @@ overleaf_watch action=start                       # 后台双向同步；服务�
 - **老协议自建实例**：不少自建实例仍是 socket.io **0.9**（如 `latex.cstcloud.cn`）。插件会自动探测（`/socket.io/1/` 握手）并切到零依赖的 0.9 客户端 （`src/transport/legacy.ts`，含同 sid 重试、自动 join、心跳），上层 API 不变。注意这类服务器**同一项目同一账号只允许一个 socket**：浏览器里开着该项目时，插件的 pull/push 会等它释放，错误信息会提示先关掉标签页。
 - **已知限制**：登录仍需从浏览器复制 Cookie（不实现账号密码/SSO 登录）；socket.io 2.x/3.x 中间代（既能连 4 又不像 0.9 的自定义分支）未单独适配。
 
+## 网络与代理
+
+到 Overleaf 的请求走 Node 的全局 `fetch`（DSH 自带的 `dsh-http-proxy` 会把 `HTTPS_PROXY` 装到进程里的每一次 `fetch` 上，本插件不用配置）。连不上时报 `E_TRANSPORT: GET … failed: fetch failed (<原因码>) — <下一步>`，原因码取自 Node 的 `error.cause`：
+
+- `SELF_SIGNED_CERT_IN_CHAIN` / `UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `CERT_HAS_EXPIRED` …：出口代理替换了 TLS 证书（公司内部 CA 签的），Node 自带的根证书包不认。模型调用可能照常（API 域名未必被替换），只有个别站点连不上。给运行 DSH 的 Node 设 `NODE_USE_SYSTEM_CA=1`（Node 24.5+，同时信任系统证书库）或 `NODE_EXTRA_CA_CERTS=<内部根 CA 的 PEM>`，然后**重启 DSH**——Node 只在启动时读一次。
+- `UND_ERR_CONNECT_TIMEOUT` / `ECONNREFUSED` / `ENETUNREACH`：连接根本没到 Overleaf。这个网络需要出口代理时，启动 DSH 前 export `HTTPS_PROXY`。
+- `ENOTFOUND` / `EAI_AGAIN`：域名没解析出来，检查 `baseUrl` 与本机 DNS。
+
+`E_TIMEOUT` 是请求发出去后在预算内没等到答复（默认 15 s，二进制下载 120 s），和上面「连接层直接失败」是两回事。
+
 ## 状态与安全
 
 - 凭据、`link.json`、`state.json`、冲突快照、审计流水都在 `~/.dsh/overleaf-sync/`，**不写进项目目录**（避免被同步上云）。

@@ -93,6 +93,61 @@ function failureForStatus(status: number, label: string, location?: string): Ove
   )
 }
 
+/** Codes Node reports on `error.cause` when it does not trust the certificate chain a connection presents. */
+const UNTRUSTED_CERTIFICATE_CODES: ReadonlySet<string> = new Set([
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+])
+/** Codes for a connection that never completed (as opposed to one that was established and answered). */
+const UNREACHABLE_CODES: ReadonlySet<string> = new Set([
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+])
+const DNS_CODES: ReadonlySet<string> = new Set(['ENOTFOUND', 'EAI_AGAIN'])
+
+/**
+ * Node's `fetch` rejects with a bare "fetch failed"; the reason sits on `error.cause` as a code.
+ * Name that code in the message and turn the recurring ones into a next step. Node reads
+ * `NODE_USE_SYSTEM_CA` / `NODE_EXTRA_CA_CERTS` once at startup, which is why both hints say restart.
+ */
+function describeFetchFailure(error: unknown): { detail: string; hint?: string } {
+  const cause = (error as { cause?: unknown } | null)?.cause
+  const record = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }) : undefined
+  const code = typeof record?.code === 'string' ? record.code : undefined
+  const detail = code ?? (typeof (cause as { message?: unknown } | undefined)?.message === 'string'
+    ? String((cause as { message: string }).message)
+    : '')
+  if (!detail) return { detail: '' }
+  if (code && UNTRUSTED_CERTIFICATE_CODES.has(code)) {
+    return {
+      detail,
+      hint: 'Node does not trust the certificate chain the connection presented, usually an outbound proxy that re-signs TLS with an internal CA: start Node with NODE_USE_SYSTEM_CA=1 (Node 24.5+) or NODE_EXTRA_CA_CERTS pointing at that CA in PEM, and restart the harness',
+    }
+  }
+  if (code && UNREACHABLE_CODES.has(code)) {
+    return {
+      detail,
+      hint: 'the connection never completed: when this network needs an outbound proxy, export HTTPS_PROXY before starting the harness',
+    }
+  }
+  if (code && DNS_CODES.has(code)) {
+    return { detail, hint: 'the host name did not resolve: check the baseUrl and this machine DNS' }
+  }
+  return { detail }
+}
+
 const NAMED_ENTITIES: Record<string, string> = {
   amp: '&',
   lt: '<',
@@ -332,10 +387,11 @@ export class OverleafHttp {
     }
     if (isOverleafError(error)) return error
     const message = error instanceof Error ? error.message : String(error)
+    const { detail, hint } = describeFetchFailure(error)
     return new OverleafSyncError(
       'E_TRANSPORT',
-      `${label} failed: ${message || 'network error'}`,
-      'check the Overleaf baseUrl, network connectivity and proxy settings, then retry',
+      `${label} failed: ${message || 'network error'}${detail ? ` (${detail})` : ''}`,
+      hint ?? 'check the Overleaf baseUrl, network connectivity and proxy settings, then retry',
     )
   }
 }
