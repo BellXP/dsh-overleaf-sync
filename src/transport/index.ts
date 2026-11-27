@@ -78,21 +78,23 @@ function withProxyHint(error: unknown, proxy: SocketProxy | undefined): unknown 
 export const createTransport: TransportFactory = async (
   credential: Credential,
   projectId: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; tunnel?: import('node:https').Agent },
 ): Promise<OverleafTransport> => {
-  const proxy = socketProxy(credential.baseUrl)
+  // A tunnel agent (an SSH host's `direct-tcpip` channel) replaces the proxy route entirely.
+  const proxy = options?.tunnel === undefined ? socketProxy(credential.baseUrl) : undefined
+  const agent = options?.tunnel ?? proxy?.agent
   const protocol = await detectSocketProtocol(credential.baseUrl, {
     ...(credential.cookie ? { cookie: credential.cookie } : {}),
     ...(options?.signal ? { signal: options.signal } : {}),
-    ...(proxy ? { agent: proxy.agent } : {}),
+    ...(agent ? { agent } : {}),
   })
   try {
     if (protocol === 'legacy') {
-      return await connectLegacy(credential, projectId, options, proxy?.agent)
+      return await connectLegacy(credential, projectId, options, agent)
     }
     return await OverleafSocket.connect(credential, projectId, {
       ...(options ?? {}),
-      ...(proxy ? { agent: proxy.agent } : {}),
+      ...(agent ? { agent } : {}),
     })
   } catch (error) {
     throw withProxyHint(error, proxy)

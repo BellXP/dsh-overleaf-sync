@@ -36,6 +36,7 @@ import { SshTree, type SshRuntimeLike } from './core/tree-ssh.js'
 import { clearCredential, loadCredential, saveCredential } from './transport/credentials.js'
 import { OverleafHttp } from './transport/http.js'
 import { createTransport } from './transport/index.js'
+import { sshTunnelAgentFor } from './transport/tunnel.js'
 import { WatchSession } from './watch/session.js'
 import type { WatchEvent } from './watch/session.js'
 import type {
@@ -87,6 +88,8 @@ export interface LinkInput {
   include?: string[]
   exclude?: string[]
   strategy?: LinkRecord['strategy']
+  /** Where the Overleaf realtime traffic leaves from (see `LinkRecord.route`). */
+  route?: LinkRecord['route']
 }
 
 export interface PullInput {
@@ -365,6 +368,77 @@ export class OverleafSyncService {
     return new SshTree(ssh, host, { pollMs: this.config.watch.pollMs })
   }
 
+  /**
+   * Open the Overleaf transport for a link, on the route its record asks for. With an SSH host
+   * and route `auto` the realtime traffic first goes through that host (`forwardOut`, a
+   * `direct-tcpip` channel: it leaves from the host's network position, past this machine's
+   * proxy); when the host cannot forward or the connection fails, `auto` falls back to this
+   * machine's route and says so in `notes`. The Overleaf credential never leaves this machine.
+   */
+  private async openTransport(
+    link: LinkRecord,
+    signal: AbortSignal | undefined,
+    notes: string[] = [],
+  ): Promise<OverleafTransport> {
+    const open = this.deps.createTransport ?? createTransport
+    const credential = await this.requireCredential()
+    const options = { ...(signal ? { signal } : {}) }
+    const route = link.route ?? 'auto'
+    if (link.host === undefined) {
+      if (route === 'ssh') notes.push('route ssh was asked for, but the link has no SSH host; used the local route')
+      return open(credential, link.projectId, options)
+    }
+    if (route === 'local') return open(credential, link.projectId, options)
+    if (this.ssh === undefined) {
+      if (route === 'ssh') throw this.noSshService(link.host)
+      notes.push(`no SSH service is loaded, so ${link.host} cannot forward; used this machine's route`)
+      return open(credential, link.projectId, options)
+    }
+    if (this.ssh.getHost(link.host) === undefined) throw this.hostNotConfigured(link.host)
+    const ssh = this.ssh
+    const host = link.host
+    const tunnel = sshTunnelAgentFor(async (target, port) => {
+      const connection = await ssh.getConnectionFor(host)
+      if (connection.forwardOut === undefined) {
+        throw new Error(`the SSH connection to ${host} cannot forward ports (old dsh-cloud-workspaces)`)
+      }
+      return connection.forwardOut(target, port)
+    }, credential.baseUrl)
+    if (tunnel === undefined) {
+      if (route === 'ssh') {
+        throw new OverleafSyncError('E_TRANSPORT', `cannot tunnel ${credential.baseUrl} through ${link.host}`, 'use route auto or local')
+      }
+      return open(credential, link.projectId, options)
+    }
+    try {
+      const transport = await open(credential, link.projectId, { ...options, tunnel })
+      await this.journal(link.projectId, { event: 'route', via: link.host })
+      return transport
+    } catch (error) {
+      tunnel.close()
+      if (route === 'ssh') throw error
+      const reason = error instanceof Error ? error.message : String(error)
+      notes.push(`direct route through ${link.host} failed (${reason}); used this machine's route`)
+      return open(credential, link.projectId, options)
+    }
+  }
+
+  private noSshService(host: string): OverleafSyncError {
+    return new OverleafSyncError(
+      'E_HOST_UNAVAILABLE',
+      `cannot route Overleaf through "${host}": no SSH service is loaded`,
+      'SSH hosts come from the dsh-cloud-workspaces plugin — install it, configure a host under 设置 → SSH 连接, then restart dsh',
+    )
+  }
+
+  private hostNotConfigured(host: string): OverleafSyncError {
+    return new OverleafSyncError(
+      'E_HOST_UNAVAILABLE',
+      `SSH host "${host}" is not configured`,
+      'list the configured hosts with ssh_list, or add one under 设置 → SSH 连接',
+    )
+  }
+
   // ---------------------------------------------------------------- credentials
 
   async credential(): Promise<Credential | undefined> {
@@ -474,6 +548,7 @@ export class OverleafSyncService {
       include: input.include ?? existing?.include ?? ['**/*.tex', '**/*.bib', '**/*.cls', '**/*.sty', '**/*.md', '**/*.txt'],
       exclude: input.exclude ?? existing?.exclude ?? ['.git/**', 'node_modules/**'],
       strategy: input.strategy ?? existing?.strategy ?? this.config.defaultStrategy,
+      ...(input.route ?? existing?.route ? { route: input.route ?? existing?.route } : {}),
       autoPush: existing?.autoPush ?? true,
       throttleMs: existing?.throttleMs ?? 500,
       binary: existing?.binary ?? 'download-only',
@@ -604,7 +679,7 @@ export class OverleafSyncService {
   private async pullUnlocked(input: PullInput, ctx: ServiceContext): Promise<PullSummary> {
     const link = await this.readLink(input.projectId)
     const tree = this.tree(link)
-    const credential = await this.requireCredential()
+    const credential = await this.requireCredential() // fail on a missing login before any socket is opened
     const warnings: string[] = []
     const summary: PullSummary = {
       projectId: link.projectId,
@@ -618,10 +693,7 @@ export class OverleafSyncService {
       warnings,
     }
 
-    const openTransport = this.deps.createTransport ?? createTransport
-    const transport = await openTransport(credential, link.projectId, {
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    })
+    const transport = await this.openTransport(link, ctx.signal, warnings)
     try {
       const snapshot = await transport.joinProject()
       const ignore = await loadIgnoreMatcher(link.localRoot, link.exclude, tree)
@@ -811,7 +883,7 @@ export class OverleafSyncService {
   private async pushUnlocked(input: PushInput, ctx: ServiceContext): Promise<PushSummary> {
     const link = await this.readLink(input.projectId)
     const tree = this.tree(link)
-    const credential = await this.requireCredential()
+    const credential = await this.requireCredential() // fail on a missing login before any socket is opened
     const warnings: string[] = []
     const summary: PushSummary = {
       projectId: link.projectId,
@@ -825,10 +897,7 @@ export class OverleafSyncService {
       warnings,
     }
 
-    const openTransport = this.deps.createTransport ?? createTransport
-    const transport = await openTransport(credential, link.projectId, {
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    })
+    const transport = await this.openTransport(link, ctx.signal, warnings)
     try {
       const snapshot = await transport.joinProject()
       const ignore = await loadIgnoreMatcher(link.localRoot, link.exclude, tree)
@@ -909,12 +978,9 @@ export class OverleafSyncService {
   async diff(input: DiffInput, ctx: ServiceContext): Promise<DiffSummary> {
     const link = await this.readLink(input.projectId)
     const tree = this.tree(link)
-    const credential = await this.requireCredential()
+    await this.requireCredential() // fail on a missing login before any socket is opened
     const wanted = input.path.replaceAll('\\', '/')
-    const openTransport = this.deps.createTransport ?? createTransport
-    const transport = await openTransport(credential, link.projectId, {
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    })
+    const transport = await this.openTransport(link, ctx.signal)
     try {
       const snapshot = await transport.joinProject()
       const remoteDocs = this.collectDocs(snapshot)
@@ -1124,11 +1190,7 @@ export class OverleafSyncService {
         // `keep_local` means "the local text is the truth" — send it now, or the
         // next pull would call the very same divergence a conflict again.
         if (!dryRun && choice === 'keep_local' && entry.kind === 'doc' && docId !== undefined) {
-          transport ??= await (this.deps.createTransport ?? createTransport)(
-            await this.requireCredential(),
-            link.projectId,
-            {},
-          )
+          transport ??= await this.openTransport(link, _ctx?.signal)
           const remote = await transport.joinDoc(docId)
           const localText = (await tree.readText(tree.join(link.localRoot, ...entry.path.split('/')))) ?? ''
           const ops = diffToOps(remote.text, localText)
@@ -1189,11 +1251,7 @@ export class OverleafSyncService {
         // Resolving the tree first turns "host not configured" into a clear
         // error before any socket to Overleaf is opened.
         const tree = this.tree(link)
-        const credential = await this.requireCredential()
-        const openTransport = this.deps.createTransport ?? createTransport
-        const transport = await openTransport(credential, link.projectId, {
-          ...(ctx.signal ? { signal: ctx.signal } : {}),
-        })
+        const transport = await this.openTransport(link, ctx.signal)
         try {
           const snapshot = await transport.joinProject()
           const docs = this.collectDocs(snapshot).map((doc) => ({

@@ -83,6 +83,8 @@ export interface SshConnectionLike {
   readonly home: string | undefined
   exec(command: string, options?: { timeoutMs?: number; cwd?: string }): Promise<SshExecOutcome>
   getSftp(): Promise<SftpLike>
+  /** `direct-tcpip` channel to `host:port` from the host's network position (optional on stubs). */
+  forwardOut?(host: string, port: number): Promise<import('node:stream').Duplex>
 }
 
 /** The slice of the dsh-cloud-workspaces `ssh` service this tree consumes. */

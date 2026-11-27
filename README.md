@@ -64,16 +64,17 @@ dsh plugin --profile desktop add link:C:/code/dsh-overleaf-sync
 
 ## 云端目录（SSH 主机）
 
-论文和实验都在云服务器上、Agent 在那边直接改 `.tex`？把链接指向服务器上的目录即可：dsh 所在机器负责和 Overleaf 通信，文件经 SSH（SFTP）读写，**服务器不需要、也不会去访问 Overleaf**，凭据与状态始终留在本机。
+论文和实验都在云服务器上、Agent 在那边直接改 `.tex`？把链接指向服务器上的目录即可：文件经 SSH（SFTP）读写，凭据与状态始终留在本机。到 Overleaf 的实时连接（socket.io）**默认优先从这台主机出去**（SSH 的 `direct-tcpip` 通道，不开本地端口、不起进程、绕过本机代理），主机不能转发或连不上时自动退回本机路线并在结果里说明；Cookie 不会离开本机。
 
 ```text
-overleaf_link  projectId=<id> host="flex-0522-4-inter" localRoot="~/papers/diffar"
+overleaf_link  projectId=<id> host="flex-0522-4-inter" localRoot="~/papers/diffar" [route=auto|ssh|local]
 overleaf_pull  dryRun=true                        # 看计划：哪些会写入、哪些已有且不同（会记为冲突）
 overleaf_pull                                    # 真正拉取；服务器上与 Overleaf 不同的同名文件保留并记冲突
 overleaf_resolve all=true choice=keep_local       # 例如：以服务器上的版本为准推到 Overleaf
 overleaf_watch action=start                       # 后台双向同步；服务器上的改动每 watch.pollMs 轮询一次
 ```
 
+- `route`：`auto`（默认，有 `host` 时先走主机、失败退回本机）、`ssh`（只走主机，失败即报错）、`local`（永远从本机）。用的是哪条记在 `journal.ndjson` 的 `route` 事件里。二进制文件下载仍走本机 HTTP。主机需要允许 TCP 转发（sshd `AllowTcpForwarding`）。另外，overleaf.com 入口的负载均衡亲和 cookie（握手响应 `Set-Cookie: GCLB=…`）现在会随 websocket 升级请求带回——这是此前「连接 1/5 成功」的真正原因，与本机还是主机出网无关。
 - `host` 是 dsh-cloud-workspaces 里配置的 SSH 别名（`ssh_list` 可见）；`localRoot` 是该主机上的路径，`~` 指向主机的家目录，相对路径也落在那里。省略 `host` 保持现状，传 `""` 把链接移回本机。
 - 所有操作照常可用：`pull` / `push` / `diff` / 冲突副本 / `resolve` / `watch` / `git init`（在主机上执行）。`status` 与工具输出用 `host:path` 表示位置；设置页里「目录位置」可选主机，侧边栏显示 `host:path`。
 - 主机只需要 `bash` 与常用 coreutils（`sha256sum`、`base64`、`tr`、`readlink`）和 GNU `find`；没有 GNU `find` 的容器自动退回逐目录 SFTP 遍历，`git` 缺失只影响自动建仓。

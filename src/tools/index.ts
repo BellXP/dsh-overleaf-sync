@@ -187,6 +187,13 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
         enum: ['keep-both', 'keep-local', 'keep-remote', 'auto'],
         description: 'Conflict policy for later pushes/pulls.',
       },
+      route: {
+        type: 'string',
+        enum: ['auto', 'ssh', 'local'],
+        description:
+          'Only with host: where the Overleaf realtime traffic leaves from. auto (default): through the SSH host, ' +
+          'falling back to this machine; ssh: only through the host; local: always from this machine.',
+      },
     },
     output: { schema: summaryOutput, render: renderText },
     execute: async (args, exec) => {
@@ -199,6 +206,7 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
             ...(args.include ? { include: args.include } : {}),
             ...(args.exclude ? { exclude: args.exclude } : {}),
             ...(args.strategy ? { strategy: args.strategy } : {}),
+            ...(args.route ? { route: args.route } : {}),
           },
           contextOf(exec, cwd),
         )
@@ -207,7 +215,7 @@ export function createOverleafTools(service: OverleafSyncService, config: Config
             `Linked "${record.projectName}" (${record.projectId}) → ${describeLocation(record.host, record.localRoot)}\n` +
             `strategy: ${record.strategy} · include: ${(record.include ?? []).join(', ')}\n` +
             (record.host !== undefined
-              ? `files go to ${record.host} over SSH; Overleaf is reached from this machine\n`
+              ? `files go to ${record.host} over SSH; Overleaf is reached through ${record.host} (route: ${record.route ?? 'auto'})\n`
               : '') +
             'Next: overleaf_pull with dryRun: true to preview, then overleaf_pull to download the project.',
           link: record,

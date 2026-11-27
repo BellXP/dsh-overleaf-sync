@@ -105,7 +105,15 @@ export interface OverleafTransport {
 }
 
 export interface TransportFactory {
-  (credential: Credential, projectId: string, options?: { signal?: AbortSignal }): Promise<OverleafTransport>
+  (
+    credential: Credential,
+    projectId: string,
+    options?: {
+      signal?: AbortSignal
+      /** HTTPS agent to route every socket through (the SSH tunnel of a link's host). */
+      tunnel?: import('node:https').Agent
+    },
+  ): Promise<OverleafTransport>
 }
 
 /** Per-project binding, persisted as `~/.dsh/overleaf-sync/projects/<id>/link.json`. */
@@ -121,6 +129,12 @@ export interface LinkRecord {
    * state stays on the machine that runs dsh. The host never needs Overleaf.
    */
   host?: string
+  /**
+   * Where the Overleaf realtime traffic leaves from. `auto` (default): through
+   * `host` when the link has one and the host accepts port forwarding, else from
+   * this machine; `ssh`: only through `host`; `local`: always from this machine.
+   */
+  route?: OverleafRoute
   include?: string[]
   exclude?: string[]
   strategy?: ConflictStrategy
@@ -133,6 +147,7 @@ export interface LinkRecord {
 }
 
 export type ConflictStrategy = 'auto' | 'keep-local' | 'keep-remote' | 'keep-both'
+export type OverleafRoute = 'auto' | 'ssh' | 'local'
 
 export interface GitRecord {
   /** `own` = created here, `parent` = already inside a bigger repository, `none` = skipped */
