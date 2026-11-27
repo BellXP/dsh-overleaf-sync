@@ -130,7 +130,10 @@ async function startFakeServer(options = {}) {
       res.end(options.handshakeStatus === 200 ? handshakeBody : '<html>nope</html>')
       return
     }
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=UTF-8' })
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=UTF-8',
+      ...(options.handshakeSetCookie === undefined ? {} : { 'Set-Cookie': options.handshakeSetCookie }),
+    })
     res.end(handshakeBody)
   })
 
@@ -532,6 +535,27 @@ describe('websocket framing', () => {
 // ---------------------------------------------------------------------------
 
 describe('LegacyOverleafSocket', () => {
+  test('sends the load balancer affinity cookie from the handshake with the upgrade, replacing a stale one', async () => {
+    // overleaf.com sits behind a Google load balancer whose handshake answers `Set-Cookie: GCLB=…`;
+    // the upgrade must carry it back or it lands on a backend that never saw the handshake (502).
+    const fake = await withServer({
+      handshakeSetCookie: ['GCLB=CMfresh_1; path=/; HttpOnly', 'other=1; path=/'],
+    })
+    const socket = await LegacyOverleafSocket.connect({
+      baseUrl: fake.baseUrl,
+      projectId: 'proj-1',
+      cookie: 'overleaf_session2=abc123; GCLB=CMstale_9',
+    })
+    try {
+      const handshake = fake.state.requests.find((request) => !request.upgraded)
+      const upgrade = fake.state.requests.find((request) => request.upgraded)
+      assert.equal(handshake.headers.cookie, 'overleaf_session2=abc123; GCLB=CMstale_9')
+      assert.equal(upgrade.headers.cookie, 'overleaf_session2=abc123; GCLB=CMfresh_1; other=1')
+    } finally {
+      socket.close()
+    }
+  })
+
   test('connects through the websocket upgrade and resolves joinProjectResponse', async () => {
     const fake = await withServer({
       joinResult: { publicId: 'public-42', project: { name: 'Fake Project' } },

@@ -724,6 +724,12 @@ export class LegacyOverleafSocket {
   #connectSeen = false
   #upgradeRejection: string | undefined
   #lastRejection: OverleafSyncError | undefined
+  /**
+   * Load balancer affinity cookie(s) from the handshake's `Set-Cookie` (overleaf.com: `GCLB`).
+   * The browser sends them back with the websocket upgrade; without them the balancer may route
+   * the upgrade to a backend that never saw the handshake, which answers 502 or nothing.
+   */
+  #routeCookies = ''
   #ackSeq = 0
   #heartbeatTimer: NodeJS.Timeout | undefined
   #fragmentOpcode: number | undefined
@@ -1117,10 +1123,36 @@ export class LegacyOverleafSocket {
 
   #requestHeaders(): Record<string, string> {
     return {
-      Cookie: this.#cookie,
+      Cookie: this.#cookieHeader(),
       Accept: '*/*',
       'Cache-Control': 'no-cache',
       'User-Agent': USER_AGENT,
+    }
+  }
+
+  /** The stored Cookie with every route cookie replaced by the handshake's fresh value. */
+  #cookieHeader(): string {
+    if (this.#routeCookies.length === 0) return this.#cookie
+    const fresh = new Set(this.#routeCookies.split('; ').map((pair) => pair.split('=')[0]))
+    const kept = this.#cookie
+      .split(';')
+      .map((part) => part.trim())
+      .filter((part) => part !== '' && !fresh.has(part.split('=')[0]))
+    return [...kept, this.#routeCookies].join('; ')
+  }
+
+  /** Keep every `name=value` pair the handshake asks to set (attribute parts dropped). */
+  #rememberRouteCookies(headers: IncomingHttpHeaders): void {
+    const raw = headers['set-cookie']
+    const list = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+    const pairs: string[] = []
+    for (const line of list) {
+      const pair = line.split(';')[0]?.trim()
+      if (pair !== undefined && pair !== '' && /^[^=\s]+=[^\s]*$/.test(pair)) pairs.push(pair)
+    }
+    if (pairs.length > 0) {
+      this.#routeCookies = pairs.join('; ')
+      this.#debug(`handshake set ${pairs.length} route cookie(s): ${pairs.map((p) => p.split('=')[0]).join(',')}`)
     }
   }
 
@@ -1135,6 +1167,7 @@ export class LegacyOverleafSocket {
         typeof response.headers.location === 'string' ? response.headers.location : undefined
       throw handshakeFailure(response.statusCode, location, response)
     }
+    this.#rememberRouteCookies(response.headers)
     return parseHandshakeResponse(response.body)
   }
 
