@@ -10,27 +10,19 @@ import {
 } from '../../lib/transport/socket.js'
 
 describe('buildUpdate (UpdateSchema)', () => {
-  it('builds op/v/lastV/meta with the client source and a timestamp', () => {
+  it('builds exactly doc/op/v/lastV - no meta, the strict server schema rejects unknown keys', () => {
     const ops = [
       { p: 3, i: 'x' },
       { p: 0, d: 'y' },
     ]
-    const before = Date.now()
     const update = buildUpdate('doc-1', 7, ops, 'client-1')
-    const after = Date.now()
 
-    assert.equal(update.doc, 'doc-1')
-    assert.equal(update.v, 7)
-    assert.equal(update.lastV, 7)
-    assert.deepEqual(update.op, ops)
-    assert.equal(update.meta.source, 'client-1')
-    assert.equal(update.meta.user_id, undefined)
-    assert.ok(update.meta.ts >= before && update.meta.ts <= after)
+    assert.deepEqual(update, { doc: 'doc-1', op: ops, v: 7, lastV: 7 })
   })
 
-  it('includes user_id and an explicit timestamp when given', () => {
+  it('never emits source, user id or timestamp: real-time fills those in itself', () => {
     const update = buildUpdate('doc', 0, [], 'src', 'user-9', 1234)
-    assert.deepEqual(update.meta, { source: 'src', ts: 1234, user_id: 'user-9' })
+    assert.ok(!('meta' in update))
     assert.deepEqual(update.op, [])
   })
 

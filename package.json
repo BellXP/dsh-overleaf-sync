@@ -1,6 +1,6 @@
 {
   "name": "dsh-overleaf-sync",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Sync a local LaTeX folder with an Overleaf project from DeepSeek Harness: pull, push, diff, watch — plus automatic git init after the first pull.",
   "type": "module",
   "main": "lib/index.js",

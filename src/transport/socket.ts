@@ -26,13 +26,12 @@ type Scheme = 'v1' | 'v2'
 /** Socket options we pass, plus legacy option names that are not in the types. */
 type SocketClientOptions = Partial<ManagerOptions & SocketOptions> & Record<string, unknown>
 
-/** Payload understood by the Overleaf socket server (`UpdateSchema`). */
+/** Payload understood by the Overleaf socket server (`applyOtUpdateSchema`, a strict object). */
 export interface UpdatePayload {
   doc: string
   op: TextOp[]
   v: number
   lastV: number
-  meta: { source: string; ts: number; user_id?: string }
 }
 
 export interface ParsedRemoteUpdate {
@@ -204,13 +203,13 @@ export function buildUpdate(
     op.push(normalized)
   }
 
-  return {
-    doc: docId,
-    op,
-    v: version,
-    lastV: version,
-    meta: userId ? { source, ts, user_id: userId } : { source, ts },
-  }
+  // real-time validates the update with a strict schema: `meta` may only carry `tc` (everything
+  // else - source, user_id, ts - is filled in by the server), and an unknown key is a validation
+  // error, which the server answers by disconnecting the client without an ack. So no meta here.
+  void source
+  void userId
+  void ts
+  return { doc: docId, op, v: version, lastV: version }
 }
 
 /**

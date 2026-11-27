@@ -40,6 +40,8 @@ import { linesToText } from './packed.js'
 const EMIT_TIMEOUT_MS = 5_000
 /** Budget for connect (handshake + upgrade + joinProject). */
 const CONNECT_BUDGET_MS = 15_000
+/** How long an acknowledged update may take to show up in a fresh joinDoc (document updater queue). */
+const APPLY_SETTLE_TIMEOUT_MS = 10_000
 
 export interface LegacyTransportOptions {
   signal?: AbortSignal
@@ -146,11 +148,19 @@ export class LegacyTransport implements OverleafTransport {
   readonly #credential: Credential
   #snapshot?: ProjectSnapshot
   #closed = false
+  /** `otUpdateError` broadcasts since the transport opened: docId, message, time. */
+  readonly #updateErrors: Array<{ docId: string; message: string; at: number }> = []
 
   private constructor(socket: LegacyOverleafSocket, credential: Credential, projectId: string) {
     this.#socket = socket
     this.#credential = credential
     this.projectId = projectId
+    socket.on('otUpdateError', (payload: unknown) => {
+      // real-time emits (error, { project_id, doc_id, error }) and then disconnects the client;
+      // the listener gets the first argument.
+      const message = typeof payload === 'string' ? payload : 'unknown error'
+      this.#updateErrors.push({ docId: '', message, at: Date.now() })
+    })
   }
 
   /** Connect, join the project and normalize the tree in one shot. */
@@ -221,12 +231,71 @@ export class LegacyTransport implements OverleafTransport {
       )
     }
     const update = buildUpdate(docId, version, ops, this.#socket.socketId)
+    const startedAt = Date.now()
     const ack = await this.#socket.emitWithAck<unknown>(
       'applyOtUpdate',
       [docId, update],
       EMIT_TIMEOUT_MS,
     )
-    return { version: nextVersionFromAck(ack, version, ops.length > 0) }
+    const reported = nextVersionFromAck(ack, version, ops.length > 0)
+    if (ops.length === 0) return { version: reported }
+    // real-time answers a rejected update with an ack whose first argument is the error
+    // (`{ message, code }`, see Router._handleError) and disconnects the client 100 ms later.
+    const rejection = ack.length === 0 ? undefined : ack[0]
+    if (typeof rejection === 'string' || (rejection !== null && typeof rejection === 'object' && !('version' in rejection) && !('v' in rejection))) {
+      const message = typeof rejection === 'string' ? rejection : String((rejection as Record<string, unknown>).message ?? JSON.stringify(rejection))
+      throw new OverleafSyncError(
+        'E_APPLY',
+        `Overleaf rejected the update of ${docId}: ${message}`,
+        'the local file is unchanged; fix the cause and push again',
+      )
+    }
+    // The ack only means "queued". real-time hands the update to the document updater, which applies
+    // it asynchronously; a rejection there (version mismatch, hash, size, ...) is reported as an
+    // `otUpdateError` broadcast to whoever is still connected - and the server then disconnects us.
+    // Closing right after the ack (as this transport used to) turned every such rejection into a
+    // "pushed" that never reached the document. So read the document back until its version moves.
+    const applied = await this.#waitForApplied(docId, version, startedAt)
+    return { version: applied }
+  }
+
+  /** Resolve once the server's copy of `docId` is past `version`, or throw the server's reason. */
+  async #waitForApplied(docId: string, version: number, startedAt: number): Promise<number> {
+    const deadline = startedAt + APPLY_SETTLE_TIMEOUT_MS
+    let lastError: { docId: string; message: string; at: number } | undefined
+    while (true) {
+      lastError = this.#updateErrors.find((e) => e.at >= startedAt && (e.docId === '' || e.docId === docId))
+      if (lastError !== undefined) {
+        throw new OverleafSyncError(
+          'E_APPLY',
+          `Overleaf rejected the update of ${docId}: ${lastError.message}`,
+          'the local file is unchanged; fix the cause and push again',
+        )
+      }
+      let content: DocContent | undefined
+      try {
+        content = await this.joinDoc(docId)
+      } catch (error) {
+        // The server disconnects the client after an otUpdateError; give the error a moment to arrive.
+        if (!this.#closed) throw error
+      }
+      if (content !== undefined && content.version > version) return content.version
+      if (Date.now() >= deadline || this.#closed) break
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+    lastError = this.#updateErrors.find((e) => e.at >= startedAt && (e.docId === '' || e.docId === docId))
+    if (lastError !== undefined) {
+      throw new OverleafSyncError(
+        'E_APPLY',
+        `Overleaf rejected the update of ${docId}: ${lastError.message}`,
+        'the local file is unchanged; fix the cause and push again',
+      )
+    }
+    throw new OverleafSyncError(
+      'E_APPLY',
+      `Overleaf acknowledged the update of ${docId} but did not apply it within ${Math.round(APPLY_SETTLE_TIMEOUT_MS / 1000)} s (still v${version})`,
+      'nothing was changed on either side; push again, and check the project history on Overleaf',
+    )
   }
 
   onRemoteUpdate(cb: (update: RemoteUpdate) => void): () => void {

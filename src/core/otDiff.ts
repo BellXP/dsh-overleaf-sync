@@ -1,10 +1,15 @@
 /**
  * Minimal text diffing for the OT wire format.
  *
- * Overleaf applies ShareJS operations against the server text: `{p, i?, d?}` where
- * `p` is a UTF-16 offset into the *server* text. We only need a correct operation,
- * not the smallest one, so a single prefix/suffix-trimmed replace is enough — and it
- * keeps the round trip (`applyOps(base, ops) === next`) trivially provable.
+ * Overleaf applies ShareJS operations against the server text: `{p, i}` or `{p, d}`
+ * where `p` is a UTF-16 offset into the *server* text. We only need a correct
+ * operation, not the smallest one, so a single prefix/suffix-trimmed replace is
+ * enough - and it keeps the round trip (`applyOps(base, ops) === next`) trivially
+ * provable.
+ *
+ * A replace is two operations, delete then insert at the same position. real-time
+ * validates each operation with a strict schema that accepts `i` or `d`, never both
+ * in one object: a combined `{p, d, i}` is "Invalid input" and the update is dropped.
  */
 import type { TextOp } from '../types.js'
 
@@ -26,10 +31,10 @@ export function diffToOps(base: string, next: string): TextOp[] {
 
   const removed = base.slice(prefix, base.length - suffix)
   const inserted = next.slice(prefix, next.length - suffix)
-  const op: TextOp = { p: prefix }
-  if (removed.length > 0) op.d = removed
-  if (inserted.length > 0) op.i = inserted
-  return [op]
+  const ops: TextOp[] = []
+  if (removed.length > 0) ops.push({ p: prefix, d: removed })
+  if (inserted.length > 0) ops.push({ p: prefix, i: inserted })
+  return ops
 }
 
 /** Apply operations in order; used for local application of remote updates. */

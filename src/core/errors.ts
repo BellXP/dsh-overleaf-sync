@@ -10,6 +10,8 @@ export type OverleafErrorCode =
   | 'E_PROJECT_NOT_FOUND'
   | 'E_TRANSPORT'
   | 'E_TIMEOUT'
+  /** Overleaf took an update but did not apply it (server-side rejection or no show in the document). */
+  | 'E_APPLY'
   | 'E_LOCAL_IO'
   | 'E_CONFLICT'
   | 'E_APPROVAL_DENIED'
